@@ -66,6 +66,7 @@ MOI.supports(::Optimizer{T}, ::MOI.ObjectiveFunction{MOI.ScalarQuadraticFunction
 MOI.supports(::Optimizer, ::MOI.Silent) = true
 MOI.supports(::Optimizer, ::MOI.RawOptimizerAttribute) = true
 MOI.supports(::Optimizer, ::MOI.SolverVersion) = true
+MOI.supports(::Optimizer, ::MOI.BarrierIterations) = true
 
 MOI.supports_constraint(::Optimizer{T}, ::Type{MOI.VectorAffineFunction{T}}, ::Type{MOI.Zeros}) where {T} = true
 MOI.supports_constraint(::Optimizer{T}, ::Type{MOI.VectorAffineFunction{T}}, ::Type{MOI.Nonnegatives}) where {T} = true
@@ -97,6 +98,8 @@ end
 
 MOI.get(::Optimizer, ::MOI.SolverName) = "JuliaQOCO"
 MOI.get(::Optimizer, ::MOI.SolverVersion) = "0.1.0"
+MOI.get(opt::Optimizer, ::MOI.BarrierIterations) = opt.native_solver === nothing ? 0 : opt.native_solver.solution.iters
+MOI.get(opt::Optimizer, ::MOI.RawSolver) = opt.native_solver
 MOI.get(opt::Optimizer, ::MOI.RawStatusString) = opt.raw_status_string
 MOI.get(opt::Optimizer, ::MOI.TerminationStatus) = opt.termination_status
 MOI.get(opt::Optimizer, ::MOI.PrimalStatus) = opt.primal_status
@@ -265,61 +268,67 @@ function _constraint_data(opt::Optimizer{T}) where {T<:AbstractFloat}
     eq_offset = 0
     cone_offset = 0
 
+    for ci in MOI.get(opt.model, MOI.ListOfConstraintIndices{MOI.VectorAffineFunction{T},MOI.Zeros}())
+        f = MOI.get(opt.model, MOI.ConstraintFunction(), ci)
+        dim = length(f.constants)
+        _append_vector_affine_eq!(Arows, Acols, Avals, b, f, eq_offset)
+        info[ci] = ConstraintInfo{T}(kind = :eq, offset = eq_offset + 1, length = dim, sign = -one(T))
+        eq_offset += dim
+    end
+
+    for ci in MOI.get(opt.model, MOI.ListOfConstraintIndices{MOI.VectorOfVariables,MOI.Zeros}())
+        f = MOI.get(opt.model, MOI.ConstraintFunction(), ci)
+        dim = length(f.variables)
+        _append_vector_of_variables_eq!(Arows, Acols, Avals, b, f, eq_offset)
+        info[ci] = ConstraintInfo{T}(kind = :eq, offset = eq_offset + 1, length = dim, sign = -one(T))
+        eq_offset += dim
+    end
+
+    # The native solver expects the cone rows ordered as all nonnegative rows
+    # first, followed by SOC blocks in q order.
+    for ci in MOI.get(opt.model, MOI.ListOfConstraintIndices{MOI.VectorAffineFunction{T},MOI.Nonnegatives}())
+        f = MOI.get(opt.model, MOI.ConstraintFunction(), ci)
+        dim = length(f.constants)
+        _append_vector_affine_cone!(Grows, Gcols, Gvals, h, f, cone_offset)
+        info[ci] = ConstraintInfo{T}(kind = :cone, offset = cone_offset + 1, length = dim)
+        cone_offset += dim
+        l += dim
+    end
+
+    for ci in MOI.get(opt.model, MOI.ListOfConstraintIndices{MOI.VectorOfVariables,MOI.Nonnegatives}())
+        f = MOI.get(opt.model, MOI.ConstraintFunction(), ci)
+        dim = length(f.variables)
+        _append_vector_of_variables_cone!(Grows, Gcols, Gvals, h, f, cone_offset)
+        info[ci] = ConstraintInfo{T}(kind = :cone, offset = cone_offset + 1, length = dim)
+        cone_offset += dim
+        l += dim
+    end
+
+    for ci in MOI.get(opt.model, MOI.ListOfConstraintIndices{MOI.VectorAffineFunction{T},MOI.SecondOrderCone}())
+        f = MOI.get(opt.model, MOI.ConstraintFunction(), ci)
+        dim = length(f.constants)
+        _append_vector_affine_cone!(Grows, Gcols, Gvals, h, f, cone_offset)
+        info[ci] = ConstraintInfo{T}(kind = :cone, offset = cone_offset + 1, length = dim)
+        cone_offset += dim
+        push!(q, dim)
+    end
+
+    for ci in MOI.get(opt.model, MOI.ListOfConstraintIndices{MOI.VectorOfVariables,MOI.SecondOrderCone}())
+        f = MOI.get(opt.model, MOI.ConstraintFunction(), ci)
+        dim = length(f.variables)
+        _append_vector_of_variables_cone!(Grows, Gcols, Gvals, h, f, cone_offset)
+        info[ci] = ConstraintInfo{T}(kind = :cone, offset = cone_offset + 1, length = dim)
+        cone_offset += dim
+        push!(q, dim)
+    end
+
     for (F, S) in MOI.get(opt.model, MOI.ListOfConstraintTypesPresent())
+        if (F == MOI.VectorAffineFunction{T} && (S == MOI.Zeros || S == MOI.Nonnegatives || S == MOI.SecondOrderCone)) ||
+           (F == MOI.VectorOfVariables && (S == MOI.Zeros || S == MOI.Nonnegatives || S == MOI.SecondOrderCone))
+            continue
+        end
         cis = MOI.get(opt.model, MOI.ListOfConstraintIndices{F,S}())
-        if F == MOI.VectorAffineFunction{T} && S == MOI.Zeros
-            for ci in cis
-                f = MOI.get(opt.model, MOI.ConstraintFunction(), ci)
-                dim = length(f.constants)
-                _append_vector_affine_eq!(Arows, Acols, Avals, b, f, eq_offset)
-                info[ci] = ConstraintInfo{T}(kind = :eq, offset = eq_offset + 1, length = dim, sign = -one(T))
-                eq_offset += dim
-            end
-        elseif F == MOI.VectorOfVariables && S == MOI.Zeros
-            for ci in cis
-                f = MOI.get(opt.model, MOI.ConstraintFunction(), ci)
-                dim = length(f.variables)
-                _append_vector_of_variables_eq!(Arows, Acols, Avals, b, f, eq_offset)
-                info[ci] = ConstraintInfo{T}(kind = :eq, offset = eq_offset + 1, length = dim, sign = -one(T))
-                eq_offset += dim
-            end
-        elseif F == MOI.VectorAffineFunction{T} && S == MOI.Nonnegatives
-            for ci in cis
-                f = MOI.get(opt.model, MOI.ConstraintFunction(), ci)
-                dim = length(f.constants)
-                _append_vector_affine_cone!(Grows, Gcols, Gvals, h, f, cone_offset)
-                info[ci] = ConstraintInfo{T}(kind = :cone, offset = cone_offset + 1, length = dim)
-                cone_offset += dim
-                l += dim
-            end
-        elseif F == MOI.VectorOfVariables && S == MOI.Nonnegatives
-            for ci in cis
-                f = MOI.get(opt.model, MOI.ConstraintFunction(), ci)
-                dim = length(f.variables)
-                _append_vector_of_variables_cone!(Grows, Gcols, Gvals, h, f, cone_offset)
-                info[ci] = ConstraintInfo{T}(kind = :cone, offset = cone_offset + 1, length = dim)
-                cone_offset += dim
-                l += dim
-            end
-        elseif F == MOI.VectorAffineFunction{T} && S == MOI.SecondOrderCone
-            for ci in cis
-                f = MOI.get(opt.model, MOI.ConstraintFunction(), ci)
-                dim = length(f.constants)
-                _append_vector_affine_cone!(Grows, Gcols, Gvals, h, f, cone_offset)
-                info[ci] = ConstraintInfo{T}(kind = :cone, offset = cone_offset + 1, length = dim)
-                cone_offset += dim
-                push!(q, dim)
-            end
-        elseif F == MOI.VectorOfVariables && S == MOI.SecondOrderCone
-            for ci in cis
-                f = MOI.get(opt.model, MOI.ConstraintFunction(), ci)
-                dim = length(f.variables)
-                _append_vector_of_variables_cone!(Grows, Gcols, Gvals, h, f, cone_offset)
-                info[ci] = ConstraintInfo{T}(kind = :cone, offset = cone_offset + 1, length = dim)
-                cone_offset += dim
-                push!(q, dim)
-            end
-        elseif !isempty(cis)
+        if !isempty(cis)
             throw(ArgumentError("Unsupported constraint type $(F) in $(S). Use the bridged optimizer interface."))
         end
     end
@@ -339,7 +348,7 @@ function MOI.optimize!(opt::Optimizer{T}) where {T<:AbstractFloat}
     opt.constraint_info = info
     opt.objective_constant = constant
     opt.objective_sign = sign
-    opt.raw_status_string = STATUS_MESSAGES[solver.solution.status]
+    opt.raw_status_string = status_string(solver.solution.status, solver.solution.status_detail)
 
     if solver.solution.status == QOCO_SOLVED
         opt.termination_status = MOI.OPTIMAL

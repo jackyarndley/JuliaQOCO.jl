@@ -67,4 +67,34 @@ end
     @test isapprox(soc.solution.x[1], 1.0; atol = 1e-6, rtol = 1e-6)
 end
 
+@testset "Warm starts and in-place updates" begin
+    P = sparse([1, 2], [1, 2], [2.0, 2.0], 2, 2)
+    c = [-1.0, -1.0]
+    A = sparse([1, 1], [1, 2], [1.0, 1.0], 1, 2)
+    b = [1.0]
+    G = sparse([1, 2], [1, 2], [-1.0, -1.0], 2, 2)
+    h = [0.0, 0.0]
+
+    solver = JuliaQOCO.Solver(P, c, A, b, G, h, 2, Int[])
+    JuliaQOCO.solve!(solver)
+    @test solver.solution.status == JuliaQOCO.QOCO_SOLVED
+    @test isapprox(solver.solution.x, [0.5, 0.5]; atol = 1e-6, rtol = 1e-6)
+
+    JuliaQOCO.update_vector_data!(solver; c = [-2.0, -1.0])
+    JuliaQOCO.solve!(solver)
+    @test solver.solution.status == JuliaQOCO.QOCO_SOLVED
+    @test isapprox(solver.solution.x, [0.75, 0.25]; atol = 1e-5, rtol = 1e-5)
+
+    JuliaQOCO.update_matrix_data!(solver; Ax = [1.0, 2.0])
+    JuliaQOCO.solve!(solver)
+    @test solver.solution.status == JuliaQOCO.QOCO_SOLVED
+    @test isapprox(solver.solution.x, [0.8, 0.1]; atol = 1e-5, rtol = 1e-5)
+    @test isapprox(solver.solution.s, [0.8, 0.1]; atol = 1e-5, rtol = 1e-5)
+
+    JuliaQOCO.warm_start!(solver; x = [0.8, 0.1], s = [0.8, 0.1], y = [0.6], z = [1.0, 1.0])
+    JuliaQOCO.solve!(solver)
+    @test solver.solution.status == JuliaQOCO.QOCO_SOLVED
+    @test isapprox(solver.solution.x, [0.8, 0.1]; atol = 1e-5, rtol = 1e-5)
+end
+
 end

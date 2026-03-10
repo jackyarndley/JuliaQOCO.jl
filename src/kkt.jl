@@ -26,6 +26,9 @@ function construct_kkt(data::ProblemData{T,Ti}, settings::Settings{T}, work::Wor
     rowval = Vector{Ti}(undef, total_nnz)
     nzval = Vector{T}(undef, total_nnz)
     nt2kkt = Vector{Ti}(undef, Wnnz)
+    P2kkt = Vector{Ti}(undef, nnz(data.P))
+    At2kkt = Vector{Ti}(undef, nnz(data.At))
+    Gt2kkt = Vector{Ti}(undef, nnz(data.Gt))
     ntdiag_positions = Vector{Ti}()
     sizehint!(ntdiag_positions, m)
 
@@ -37,6 +40,7 @@ function construct_kkt(data::ProblemData{T,Ti}, settings::Settings{T}, work::Wor
         for k in data.P.colptr[j]:(data.P.colptr[j + 1] - 1)
             rowval[nz] = data.P.rowval[k]
             nzval[nz] = data.P.nzval[k]
+            P2kkt[k] = Ti(nz)
             nz += 1
         end
         colptr[col + 1] = Ti(nz)
@@ -47,6 +51,7 @@ function construct_kkt(data::ProblemData{T,Ti}, settings::Settings{T}, work::Wor
         for k in data.At.colptr[j]:(data.At.colptr[j + 1] - 1)
             rowval[nz] = data.At.rowval[k]
             nzval[nz] = data.At.nzval[k]
+            At2kkt[k] = Ti(nz)
             nz += 1
         end
         rowval[nz] = Ti(n + j)
@@ -61,6 +66,7 @@ function construct_kkt(data::ProblemData{T,Ti}, settings::Settings{T}, work::Wor
         for k in data.Gt.colptr[j]:(data.Gt.colptr[j + 1] - 1)
             rowval[nz] = data.Gt.rowval[k]
             nzval[nz] = data.Gt.nzval[k]
+            Gt2kkt[k] = Ti(nz)
             nz += 1
         end
         rowval[nz] = Ti(n + p + j)
@@ -79,6 +85,7 @@ function construct_kkt(data::ProblemData{T,Ti}, settings::Settings{T}, work::Wor
             for k in data.Gt.colptr[global_col]:(data.Gt.colptr[global_col + 1] - 1)
                 rowval[nz] = data.Gt.rowval[k]
                 nzval[nz] = data.Gt.nzval[k]
+                Gt2kkt[k] = Ti(nz)
                 nz += 1
             end
             local_col = global_col - cone_start + 1
@@ -99,7 +106,7 @@ function construct_kkt(data::ProblemData{T,Ti}, settings::Settings{T}, work::Wor
     end
 
     K = SparseMatrixCSC(N, N, colptr, rowval, nzval)
-    return K, nt2kkt, ntdiag_positions
+    return K, nt2kkt, ntdiag_positions, P2kkt, At2kkt, Gt2kkt
 end
 
 function set_identity_scalings!(solver::Solver{T}) where {T<:AbstractFloat}
@@ -186,6 +193,9 @@ function solve_linsys!(solver::Solver{T}, rhs::AbstractVector{T}, x::AbstractVec
 end
 
 function initialize_ipm!(solver::Solver{T}) where {T<:AbstractFloat}
+    if _apply_warmstart!(solver)
+        return nothing
+    end
     data = solver.data
     work = solver.work
     set_identity_scalings!(solver)
@@ -414,8 +424,10 @@ function check_stopping!(solver::Solver{T}) where {T<:AbstractFloat}
            solver.solution.dres < solver.settings.abstol_inacc + solver.settings.reltol_inacc * dres_rel &&
            solver.solution.gap < solver.settings.abstol_inacc + solver.settings.reltol_inacc * gap_rel
             solver.solution.status = QOCO_SOLVED_INACCURATE
+            solver.solution.status_detail = "stalled step but met inaccurate tolerances"
         else
             solver.solution.status = QOCO_NUMERICAL_ERROR
+            solver.solution.status_detail = "step length dropped below 1e-8"
         end
         return true
     end
@@ -424,6 +436,7 @@ function check_stopping!(solver::Solver{T}) where {T<:AbstractFloat}
        solver.solution.dres < solver.settings.abstol + solver.settings.reltol * dres_rel &&
        solver.solution.gap < solver.settings.abstol + solver.settings.reltol * gap_rel
         solver.solution.status = QOCO_SOLVED
+        solver.solution.status_detail = ""
         return true
     end
     return false

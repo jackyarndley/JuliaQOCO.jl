@@ -17,15 +17,18 @@ mutable struct ProblemData{T<:AbstractFloat,Ti<:Integer}
     c::Vector{T}
     A::SparseMatrixCSC{T,Ti}
     At::SparseMatrixCSC{T,Ti}
+    AtoAt::Vector{Ti}
     b::Vector{T}
     G::SparseMatrixCSC{T,Ti}
     Gt::SparseMatrixCSC{T,Ti}
+    GtoGt::Vector{Ti}
     h::Vector{T}
     l::Ti
     q::Vector{Ti}
     n::Ti
     m::Ti
     p::Ti
+    Padded_idx::Vector{Ti}
     stats::ScalingStats{T}
 end
 
@@ -37,6 +40,8 @@ mutable struct Scaling{T<:AbstractFloat}
     Dinvruiz::Vector{T}
     Einvruiz::Vector{T}
     Finvruiz::Vector{T}
+    Anorm::Vector{T}
+    Gnorm::Vector{T}
     k::T
     kinv::T
 end
@@ -84,11 +89,12 @@ mutable struct Solution{T<:AbstractFloat}
     dres::T
     gap::T
     status::SolveStatus
+    status_detail::String
 end
 
 function Solution(::Type{T}, n::Integer, m::Integer, p::Integer) where {T<:AbstractFloat}
     z = zero(T)
-    return Solution{T}(zeros(T, n), zeros(T, m), zeros(T, p), zeros(T, m), 0, 0.0, 0.0, z, z, z, z, QOCO_UNSOLVED)
+    return Solution{T}(zeros(T, n), zeros(T, m), zeros(T, p), zeros(T, m), 0, 0.0, 0.0, z, z, z, z, QOCO_UNSOLVED, "")
 end
 
 mutable struct LinearSystem{T<:AbstractFloat,Ti<:Integer,F}
@@ -96,6 +102,21 @@ mutable struct LinearSystem{T<:AbstractFloat,Ti<:Integer,F}
     nt2kkt::Vector{Ti}
     ntdiag_positions::Vector{Ti}
     nt_values::Vector{T}
+    static2kkt::Vector{Ti}
+    static_values::Vector{T}
+end
+
+mutable struct Warmstart{T<:AbstractFloat}
+    x::Vector{T}
+    s::Vector{T}
+    y::Vector{T}
+    z::Vector{T}
+    active::Bool
+    manual::Bool
+end
+
+function Warmstart(::Type{T}, n::Integer, m::Integer, p::Integer) where {T<:AbstractFloat}
+    return Warmstart{T}(zeros(T, n), zeros(T, m), zeros(T, p), zeros(T, m), false, false)
 end
 
 mutable struct Solver{T<:AbstractFloat,Ti<:Integer,F}
@@ -105,4 +126,5 @@ mutable struct Solver{T<:AbstractFloat,Ti<:Integer,F}
     work::Workspace{T,Ti}
     linsys::LinearSystem{T,Ti,F}
     solution::Solution{T}
+    warmstart::Warmstart{T}
 end

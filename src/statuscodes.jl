@@ -13,3 +13,6 @@ const STATUS_MESSAGES = Dict(
     QOCO_NUMERICAL_ERROR => "numerical_error",
     QOCO_MAX_ITER => "max_iterations",
 )
+
+status_string(status::SolveStatus, detail::AbstractString = "") =
+    isempty(detail) ? STATUS_MESSAGES[status] : string(STATUS_MESSAGES[status], " (", detail, ")")

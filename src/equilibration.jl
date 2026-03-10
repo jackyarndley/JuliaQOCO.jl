@@ -39,6 +39,8 @@ function initialize_scaling(data::ProblemData{T}) where {T<:AbstractFloat}
         ones(T, data.n),
         ones(T, data.p),
         ones(T, data.m),
+        zeros(T, data.n),
+        zeros(T, data.n),
         one(T),
         one(T),
     )
@@ -57,8 +59,8 @@ function ruiz_equilibration!(data::ProblemData{T,Ti}, scaling::Scaling{T}, ruiz_
     D = @view scaling.delta[1:data.n]
     E = @view scaling.delta[(data.n + 1):(data.n + data.p)]
     F = @view scaling.delta[(data.n + data.p + 1):(data.n + data.p + data.m)]
-    Anorm = zeros(T, data.n)
-    Gnorm = zeros(T, data.n)
+    Anorm = scaling.Anorm
+    Gnorm = scaling.Gnorm
 
     for _ in 1:ruiz_iters
         fill!(D, zero(T))

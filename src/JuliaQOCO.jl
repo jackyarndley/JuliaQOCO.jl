@@ -14,6 +14,10 @@ export Settings,
        Solution,
        Solver,
        Optimizer,
+       warm_start!,
+       clear_warmstart!,
+       update_vector_data!,
+       update_matrix_data!,
        copy_settings,
        default_settings,
        solve!,
@@ -28,6 +32,7 @@ include("equilibration.jl")
 include("cones.jl")
 include("kkt.jl")
 include("solver.jl")
+include("updates.jl")
 include("moi_wrapper.jl")
 
 default_settings(::Type{T} = Float64) where {T<:AbstractFloat} = Settings{T}()
