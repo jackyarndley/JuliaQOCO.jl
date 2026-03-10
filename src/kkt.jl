@@ -29,8 +29,8 @@ function construct_kkt(data::ProblemData{T,Ti}, settings::Settings{T}, work::Wor
     P2kkt = Vector{Ti}(undef, nnz(data.P))
     At2kkt = Vector{Ti}(undef, nnz(data.At))
     Gt2kkt = Vector{Ti}(undef, nnz(data.Gt))
-    ntdiag_positions = Vector{Ti}()
-    sizehint!(ntdiag_positions, m)
+    ntdiag_positions = Vector{Ti}(undef, m)
+    diagpos = 1
 
     colptr[1] = one(Ti)
     nz = 1
@@ -72,7 +72,8 @@ function construct_kkt(data::ProblemData{T,Ti}, settings::Settings{T}, work::Wor
         rowval[nz] = Ti(n + p + j)
         nzval[nz] = -one(T)
         nt2kkt[ntpos] = Ti(nz)
-        push!(ntdiag_positions, Ti(ntpos))
+        ntdiag_positions[diagpos] = Ti(ntpos)
+        diagpos += 1
         ntpos += 1
         nz += 1
         colptr[col + 1] = Ti(nz)
@@ -94,7 +95,8 @@ function construct_kkt(data::ProblemData{T,Ti}, settings::Settings{T}, work::Wor
                 nzval[nz] = local_row == local_col ? -one(T) : zero(T)
                 nt2kkt[ntpos] = Ti(nz)
                 if local_row == local_col
-                    push!(ntdiag_positions, Ti(ntpos))
+                    ntdiag_positions[diagpos] = Ti(ntpos)
+                    diagpos += 1
                 end
                 ntpos += 1
                 nz += 1

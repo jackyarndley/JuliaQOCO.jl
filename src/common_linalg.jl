@@ -17,15 +17,16 @@ end
 function regularize_P_with_info(P::SparseMatrixCSC{T,Ti}, reg::T) where {T<:AbstractFloat,Ti<:Integer}
     U = istriu(P) ? copy(P) : SparseMatrixCSC(triu(P))
     n = size(U, 1)
-    nnz_est = nnz(U) + (n - count_diag_upper(U))
+    diag_count = count_diag_upper(U)
+    missing_diag = n - diag_count
+    nnz_est = nnz(U) + missing_diag
     colptr = Vector{Ti}(undef, n + 1)
-    rowval = Vector{Ti}()
-    nzval = Vector{T}()
-    padded_idx = Vector{Ti}()
-    sizehint!(rowval, nnz_est)
-    sizehint!(nzval, nnz_est)
-    sizehint!(padded_idx, n - count_diag_upper(U))
+    rowval = Vector{Ti}(undef, nnz_est)
+    nzval = Vector{T}(undef, nnz_est)
+    padded_idx = Vector{Ti}(undef, missing_diag)
     colptr[1] = one(Ti)
+    nz = 1
+    pad = 1
     @inbounds for j in 1:n
         diag_found = false
         for k in U.colptr[j]:(U.colptr[j + 1] - 1)
@@ -35,15 +36,18 @@ function regularize_P_with_info(P::SparseMatrixCSC{T,Ti}, reg::T) where {T<:Abst
                 val += reg
                 diag_found = true
             end
-            push!(rowval, row)
-            push!(nzval, val)
+            rowval[nz] = row
+            nzval[nz] = val
+            nz += 1
         end
         if !diag_found
-            push!(rowval, Ti(j))
-            push!(nzval, reg)
-            push!(padded_idx, Ti(length(rowval)))
+            rowval[nz] = Ti(j)
+            nzval[nz] = reg
+            padded_idx[pad] = Ti(nz)
+            pad += 1
+            nz += 1
         end
-        colptr[j + 1] = Ti(length(rowval) + 1)
+        colptr[j + 1] = Ti(nz)
     end
     return SparseMatrixCSC(n, n, colptr, rowval, nzval), padded_idx
 end

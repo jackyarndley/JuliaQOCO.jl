@@ -6,13 +6,15 @@
     QOCO_MAX_ITER = 4
 end
 
-const STATUS_MESSAGES = Dict(
-    QOCO_UNSOLVED => "unsolved",
-    QOCO_SOLVED => "solved",
-    QOCO_SOLVED_INACCURATE => "solved_inaccurately",
-    QOCO_NUMERICAL_ERROR => "numerical_error",
-    QOCO_MAX_ITER => "max_iterations",
+const STATUS_MESSAGES = (
+    "unsolved",
+    "solved",
+    "solved_inaccurately",
+    "numerical_error",
+    "max_iterations",
 )
 
+@inline status_message(status::SolveStatus) = @inbounds STATUS_MESSAGES[Int(status) + 1]
+
 status_string(status::SolveStatus, detail::AbstractString = "") =
-    isempty(detail) ? STATUS_MESSAGES[status] : string(STATUS_MESSAGES[status], " (", detail, ")")
+    isempty(detail) ? status_message(status) : string(status_message(status), " (", detail, ")")

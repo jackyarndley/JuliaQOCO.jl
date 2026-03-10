@@ -223,6 +223,68 @@ const MOIU = MOI.Utilities
         @test MOI.get(opt, MOI.ObjectiveValue()) ≈ 0.5 atol = 1e-4
     end
 
+    @testset "Direct MOI coefficient updates" begin
+        opt = JuliaQOCO.Optimizer()
+        MOI.set(opt, MOI.Silent(), true)
+
+        @test MOI.supports_incremental_interface(opt)
+
+        x = MOI.add_variables(opt, 2)
+        quad_terms = [
+            MOI.ScalarQuadraticTerm(2.0, x[1], x[1]),
+            MOI.ScalarQuadraticTerm(2.0, x[2], x[2]),
+        ]
+        aff_terms = [
+            MOI.ScalarAffineTerm(-1.0, x[1]),
+            MOI.ScalarAffineTerm(-1.0, x[2]),
+        ]
+        obj = MOI.ScalarQuadraticFunction(quad_terms, aff_terms, 0.0)
+        MOI.set(opt, MOI.ObjectiveSense(), MOI.MIN_SENSE)
+        MOI.set(opt, MOI.ObjectiveFunction{typeof(obj)}(), obj)
+
+        eq_func = MOI.VectorAffineFunction(
+            [
+                MOI.VectorAffineTerm(1, MOI.ScalarAffineTerm(1.0, x[1])),
+                MOI.VectorAffineTerm(1, MOI.ScalarAffineTerm(1.0, x[2])),
+            ],
+            [-1.0],
+        )
+        eq_ci = MOI.add_constraint(opt, eq_func, MOI.Zeros(1))
+
+        nn_func = MOI.VectorAffineFunction(
+            [
+                MOI.VectorAffineTerm(1, MOI.ScalarAffineTerm(1.0, x[1])),
+                MOI.VectorAffineTerm(2, MOI.ScalarAffineTerm(1.0, x[2])),
+            ],
+            [0.0, 0.0],
+        )
+        MOI.add_constraint(opt, nn_func, MOI.Nonnegatives(2))
+
+        MOI.optimize!(opt)
+        @test MOI.get(opt, MOI.TerminationStatus()) == MOI.OPTIMAL
+        @test MOI.get(opt, MOI.VariablePrimal(), x[1]) ≈ 0.5 atol = 1e-5
+        @test MOI.get(opt, MOI.VariablePrimal(), x[2]) ≈ 0.5 atol = 1e-5
+
+        raw_solver = MOI.get(opt, MOI.RawSolver())
+        MOI.modify(opt, eq_ci, MOI.MultirowChange(x[2], [(1, 2.0)]))
+        MOI.optimize!(opt)
+
+        @test MOI.get(opt, MOI.TerminationStatus()) == MOI.OPTIMAL
+        @test MOI.get(opt, MOI.VariablePrimal(), x[1]) ≈ 0.4 atol = 1e-5
+        @test MOI.get(opt, MOI.VariablePrimal(), x[2]) ≈ 0.3 atol = 1e-5
+        @test MOI.get(opt, MOI.ObjectiveValue()) ≈ -0.45 atol = 1e-5
+        @test MOI.get(opt, MOI.RawSolver()) === raw_solver
+
+        MOI.modify(opt, eq_ci, MOI.VectorConstantChange([-1.2]))
+        MOI.optimize!(opt)
+
+        @test MOI.get(opt, MOI.TerminationStatus()) == MOI.OPTIMAL
+        @test MOI.get(opt, MOI.VariablePrimal(), x[1]) ≈ 0.44 atol = 1e-5
+        @test MOI.get(opt, MOI.VariablePrimal(), x[2]) ≈ 0.38 atol = 1e-5
+        @test MOI.get(opt, MOI.ObjectiveValue()) ≈ -0.482 atol = 1e-5
+        @test MOI.get(opt, MOI.RawSolver()) === raw_solver
+    end
+
     @testset "Empty model" begin
         opt = JuliaQOCO.Optimizer()
         MOI.set(opt, MOI.Silent(), true)
@@ -401,6 +463,51 @@ end
     @test JuMP.value(x[1]) ≈ 0.5 atol = 1e-4
     @test JuMP.value(x[2]) ≈ 0.5 atol = 1e-4
     @test JuMP.objective_value(model) ≈ -0.5 atol = 1e-4
+end
+
+@testset "JuMP direct normalized coefficient updates" begin
+    backend = MOI.Bridges.full_bridge_optimizer(JuliaQOCO.Optimizer(), Float64)
+    model = JuMP.direct_model(backend)
+    JuMP.set_silent(model)
+
+    @variable(model, x[1:2])
+    @constraint(model, x in MOI.Nonnegatives(2))
+    con = @constraint(model, x[1] + x[2] == 1)
+    @objective(model, Min, x[1]^2 + x[2]^2 - x[1] - x[2])
+
+    JuMP.optimize!(model)
+
+    @test JuMP.termination_status(model) == MOI.OPTIMAL
+    @test JuMP.value(x[1]) ≈ 0.5 atol = 1e-4
+    @test JuMP.value(x[2]) ≈ 0.5 atol = 1e-4
+
+    JuMP.set_normalized_coefficient(con, x[2], 2.0)
+    JuMP.optimize!(model)
+
+    @test JuMP.termination_status(model) == MOI.OPTIMAL
+    @test JuMP.value(x[1]) ≈ 0.4 atol = 1e-4
+    @test JuMP.value(x[2]) ≈ 0.3 atol = 1e-4
+    @test JuMP.objective_value(model) ≈ -0.45 atol = 1e-4
+end
+
+@testset "JuMP normalized rhs updates" begin
+    model = JuMP.Model(JuliaQOCO.Optimizer)
+    JuMP.set_silent(model)
+
+    @variable(model, x[1:2] >= 0)
+    con = @constraint(model, x[1] + x[2] == 1)
+    @objective(model, Min, x[1]^2 + x[2]^2 - x[1] - x[2])
+
+    JuMP.optimize!(model)
+    @test JuMP.termination_status(model) == MOI.OPTIMAL
+
+    JuMP.set_normalized_rhs(con, 1.2)
+    JuMP.optimize!(model)
+
+    @test JuMP.termination_status(model) == MOI.OPTIMAL
+    @test JuMP.value(x[1]) ≈ 0.6 atol = 1e-4
+    @test JuMP.value(x[2]) ≈ 0.6 atol = 1e-4
+    @test JuMP.objective_value(model) ≈ -0.48 atol = 1e-4
 end
 
 end

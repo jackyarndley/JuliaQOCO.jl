@@ -106,17 +106,17 @@ function _fill_static_values!(dest::AbstractVector{T}, data::ProblemData{T}) whe
     pos = 1
     np = nnz(data.P)
     if np > 0
-        copyto!(view(dest, pos:(pos + np - 1)), data.P.nzval)
+        copyto!(dest, pos, data.P.nzval, 1, np)
         pos += np
     end
     nat = nnz(data.At)
     if nat > 0
-        copyto!(view(dest, pos:(pos + nat - 1)), data.At.nzval)
+        copyto!(dest, pos, data.At.nzval, 1, nat)
         pos += nat
     end
     ngt = nnz(data.Gt)
     if ngt > 0
-        copyto!(view(dest, pos:(pos + ngt - 1)), data.Gt.nzval)
+        copyto!(dest, pos, data.Gt.nzval, 1, ngt)
     end
     return dest
 end
@@ -126,7 +126,11 @@ function _linsys(data::ProblemData{T,Ti}, settings::Settings{T}, work::Workspace
         return LinearSystem{T,Ti,Nothing}(nothing, Ti[], Ti[], zeros(T, length(work.WtW)), Ti[], T[])
     end
     K, nt2kkt, ntdiag_positions, P2kkt, At2kkt, Gt2kkt = construct_kkt(data, settings, work)
-    signs = vcat(ones(Int, data.n), -ones(Int, data.p + data.m))
+    signs = Vector{Int}(undef, data.n + data.p + data.m)
+    fill!(signs, -1)
+    @inbounds for i in 1:Int(data.n)
+        signs[i] = 1
+    end
     factor = QDLDL.qdldl(
         K;
         Dsigns = signs,
@@ -135,11 +139,17 @@ function _linsys(data::ProblemData{T,Ti}, settings::Settings{T}, work::Workspace
     )
     static2kkt = Vector{Ti}(undef, length(P2kkt) + length(At2kkt) + length(Gt2kkt))
     pos = 1
-    copyto!(view(static2kkt, pos:(pos + length(P2kkt) - 1)), P2kkt)
-    pos += length(P2kkt)
-    copyto!(view(static2kkt, pos:(pos + length(At2kkt) - 1)), At2kkt)
-    pos += length(At2kkt)
-    copyto!(view(static2kkt, pos:(pos + length(Gt2kkt) - 1)), Gt2kkt)
+    if !isempty(P2kkt)
+        copyto!(static2kkt, pos, P2kkt, 1, length(P2kkt))
+        pos += length(P2kkt)
+    end
+    if !isempty(At2kkt)
+        copyto!(static2kkt, pos, At2kkt, 1, length(At2kkt))
+        pos += length(At2kkt)
+    end
+    if !isempty(Gt2kkt)
+        copyto!(static2kkt, pos, Gt2kkt, 1, length(Gt2kkt))
+    end
     static_values = zeros(T, length(static2kkt))
     _fill_static_values!(static_values, data)
     return LinearSystem{T,Ti,typeof(factor)}(
