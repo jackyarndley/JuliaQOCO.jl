@@ -465,6 +465,26 @@ end
     @test JuMP.objective_value(model) ≈ -0.5 atol = 1e-4
 end
 
+@testset "JuMP structural edits after optimize" begin
+    model = JuMP.Model(JuliaQOCO.Optimizer)
+    JuMP.set_silent(model)
+
+    @variable(model, x[1:2] >= 0)
+    @constraint(model, x[1] + x[2] == 1)
+    @objective(model, Min, x[1]^2 + x[2]^2 - x[1] - x[2])
+
+    JuMP.optimize!(model)
+    @test JuMP.termination_status(model) == MOI.OPTIMAL
+
+    @constraint(model, x[1] <= 0.4)
+    JuMP.optimize!(model)
+
+    @test JuMP.termination_status(model) == MOI.OPTIMAL
+    @test JuMP.value(x[1]) ≈ 0.4 atol = 1e-4
+    @test JuMP.value(x[2]) ≈ 0.6 atol = 1e-4
+    @test JuMP.objective_value(model) ≈ -0.48 atol = 1e-4
+end
+
 @testset "JuMP direct normalized coefficient updates" begin
     backend = MOI.Bridges.full_bridge_optimizer(JuliaQOCO.Optimizer(), Float64)
     model = JuMP.direct_model(backend)

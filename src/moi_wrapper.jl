@@ -59,6 +59,15 @@ function _reset_results!(opt::Optimizer{T}) where {T<:AbstractFloat}
     return _clear_results!(opt)
 end
 
+@inline function _structural_edit_message()
+    return "Structural edits after optimize should go through a caching layer so the backend can reset and rebuild efficiently on the next solve."
+end
+
+@inline function _throw_if_structural_edit_attached(opt::Optimizer)
+    opt.native_solver === nothing || throw(MOI.AddVariableNotAllowed(_structural_edit_message()))
+    return nothing
+end
+
 MOI.empty!(opt::Optimizer) = (MOI.empty!(opt.model); _reset_results!(opt); nothing)
 MOI.is_empty(opt::Optimizer) = MOI.is_empty(opt.model)
 MOI.supports_incremental_interface(::Optimizer) = true
@@ -127,24 +136,28 @@ MOI.is_valid(opt::Optimizer, vi::MOI.VariableIndex) = MOI.is_valid(opt.model, vi
 MOI.is_valid(opt::Optimizer, ci::MOI.ConstraintIndex) = MOI.is_valid(opt.model, ci)
 
 function MOI.add_variable(opt::Optimizer)
+    _throw_if_structural_edit_attached(opt)
     vi = MOI.add_variable(opt.model)
     _clear_results!(opt)
     return vi
 end
 
 function MOI.add_variables(opt::Optimizer, n::Int)
+    _throw_if_structural_edit_attached(opt)
     vis = MOI.add_variables(opt.model, n)
     _clear_results!(opt)
     return vis
 end
 
 function MOI.add_constrained_variable(opt::Optimizer, set::S) where {S<:MOI.AbstractScalarSet}
+    _throw_if_structural_edit_attached(opt)
     result = MOI.add_constrained_variable(opt.model, set)
     _clear_results!(opt)
     return result
 end
 
 function MOI.add_constrained_variables(opt::Optimizer, set::S) where {S<:MOI.AbstractVectorSet}
+    _throw_if_structural_edit_attached(opt)
     result = MOI.add_constrained_variables(opt.model, set)
     _clear_results!(opt)
     return result
@@ -161,30 +174,39 @@ function MOI.add_constraint(
     func::F,
     set::S,
 ) where {T<:AbstractFloat,F<:MOI.AbstractFunction,S<:MOI.AbstractSet}
+    opt.native_solver === nothing || throw(MOI.AddConstraintNotAllowed{F,S}(_structural_edit_message()))
     ci = MOI.add_constraint(opt.model, func, set)
     _clear_results!(opt)
     return ci
 end
 
 function MOI.delete(opt::Optimizer, vi::MOI.VariableIndex)
+    opt.native_solver === nothing || throw(MOI.DeleteNotAllowed(vi, _structural_edit_message()))
     MOI.delete(opt.model, vi)
     _clear_results!(opt)
     return nothing
 end
 
 function MOI.delete(opt::Optimizer, vis::Vector{MOI.VariableIndex})
+    if opt.native_solver !== nothing && !isempty(vis)
+        throw(MOI.DeleteNotAllowed(first(vis), _structural_edit_message()))
+    end
     MOI.delete(opt.model, vis)
     _clear_results!(opt)
     return nothing
 end
 
 function MOI.delete(opt::Optimizer, ci::MOI.ConstraintIndex)
+    opt.native_solver === nothing || throw(MOI.DeleteNotAllowed(ci, _structural_edit_message()))
     MOI.delete(opt.model, ci)
     _clear_results!(opt)
     return nothing
 end
 
 function MOI.delete(opt::Optimizer, cis::Vector{CI}) where {CI<:MOI.ConstraintIndex}
+    if opt.native_solver !== nothing && !isempty(cis)
+        throw(MOI.DeleteNotAllowed(first(cis), _structural_edit_message()))
+    end
     MOI.delete(opt.model, cis)
     _clear_results!(opt)
     return nothing
