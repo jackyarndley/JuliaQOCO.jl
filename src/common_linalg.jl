@@ -11,10 +11,6 @@ function count_diag_upper(P::SparseMatrixCSC)
 end
 
 function regularize_P(P::SparseMatrixCSC{T,Ti}, reg::T) where {T<:AbstractFloat,Ti<:Integer}
-    return first(regularize_P_with_info(P, reg))
-end
-
-function regularize_P_with_info(P::SparseMatrixCSC{T,Ti}, reg::T) where {T<:AbstractFloat,Ti<:Integer}
     U = istriu(P) ? copy(P) : SparseMatrixCSC(triu(P))
     n = size(U, 1)
     diag_count = count_diag_upper(U)
@@ -23,10 +19,8 @@ function regularize_P_with_info(P::SparseMatrixCSC{T,Ti}, reg::T) where {T<:Abst
     colptr = Vector{Ti}(undef, n + 1)
     rowval = Vector{Ti}(undef, nnz_est)
     nzval = Vector{T}(undef, nnz_est)
-    padded_idx = Vector{Ti}(undef, missing_diag)
     colptr[1] = one(Ti)
     nz = 1
-    pad = 1
     @inbounds for j in 1:n
         diag_found = false
         for k in U.colptr[j]:(U.colptr[j + 1] - 1)
@@ -43,13 +37,11 @@ function regularize_P_with_info(P::SparseMatrixCSC{T,Ti}, reg::T) where {T<:Abst
         if !diag_found
             rowval[nz] = Ti(j)
             nzval[nz] = reg
-            padded_idx[pad] = Ti(nz)
-            pad += 1
             nz += 1
         end
         colptr[j + 1] = Ti(nz)
     end
-    return SparseMatrixCSC(n, n, colptr, rowval, nzval), padded_idx
+    return SparseMatrixCSC(n, n, colptr, rowval, nzval)
 end
 
 function construct_identity_upper(::Type{T}, n::Integer, λ::T) where {T<:AbstractFloat}
@@ -67,10 +59,6 @@ function construct_identity_upper(::Type{T}, n::Integer, λ::T) where {T<:Abstra
 end
 
 function create_transposed_matrix(A::SparseMatrixCSC{T,Ti}) where {T,Ti<:Integer}
-    return first(create_transposed_matrix_with_map(A))
-end
-
-function create_transposed_matrix_with_map(A::SparseMatrixCSC{T,Ti}) where {T,Ti<:Integer}
     m, n = size(A)
     nnzA = nnz(A)
     counts = zeros(Ti, m)
@@ -85,18 +73,16 @@ function create_transposed_matrix_with_map(A::SparseMatrixCSC{T,Ti}) where {T,Ti
     nextptr = copy(colptr)
     rowval = Vector{Ti}(undef, nnzA)
     nzval = Vector{T}(undef, nnzA)
-    to_original = Vector{Ti}(undef, nnzA)
     @inbounds for j in 1:n
         for k in A.colptr[j]:(A.colptr[j + 1] - 1)
             row = A.rowval[k]
             dest = nextptr[row]
             rowval[dest] = Ti(j)
             nzval[dest] = A.nzval[k]
-            to_original[dest] = Ti(k)
             nextptr[row] += one(Ti)
         end
     end
-    return SparseMatrixCSC(n, m, colptr, rowval, nzval), to_original
+    return SparseMatrixCSC(n, m, colptr, rowval, nzval)
 end
 
 function shift_diag!(P::SparseMatrixCSC{T,Ti}, reg::T) where {T<:AbstractFloat,Ti<:Integer}
@@ -113,27 +99,6 @@ end
 
 regularize_existing_P!(P::SparseMatrixCSC{T,Ti}, reg::T) where {T<:AbstractFloat,Ti<:Integer} = shift_diag!(P, reg)
 unregularize_P!(P::SparseMatrixCSC{T,Ti}, reg::T) where {T<:AbstractFloat,Ti<:Integer} = shift_diag!(P, -reg)
-
-function copy_original_P_values!(
-    P::SparseMatrixCSC{T,Ti},
-    Pxnew::AbstractVector{T},
-    padded_idx::AbstractVector{Ti},
-) where {T<:AbstractFloat,Ti<:Integer}
-    nnz(P) - length(padded_idx) == length(Pxnew) || throw(ArgumentError("Pxnew must match the original nnz(P) before regularization"))
-    padded_pos = 1
-    next_padded = isempty(padded_idx) ? typemax(Ti) : padded_idx[padded_pos]
-    src = 1
-    @inbounds for k in 1:nnz(P)
-        if k == next_padded
-            padded_pos += 1
-            next_padded = padded_pos <= length(padded_idx) ? padded_idx[padded_pos] : typemax(Ti)
-        else
-            P.nzval[k] = Pxnew[src]
-            src += 1
-        end
-    end
-    return P
-end
 
 function row_col_scale_matrix!(A::SparseMatrixCSC{T,Ti}, row_scale::AbstractVector{T}, col_scale::AbstractVector{T}) where {T<:AbstractFloat,Ti<:Integer}
     @inbounds for j in 1:size(A, 2)

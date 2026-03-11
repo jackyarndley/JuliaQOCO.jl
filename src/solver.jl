@@ -73,26 +73,23 @@ function _problem_data(
     P0 = P === nothing ? spzeros(T, n, n) : (istriu(P) ? copy(P) : SparseMatrixCSC(triu(P)))
     qv = Ti.(collect(q))
 
-    At0, AtoAt = create_transposed_matrix_with_map(A0)
-    Gt0, GtoGt = create_transposed_matrix_with_map(G0)
-    P1, Padded_idx = regularize_P_with_info(P0, zero(T))
+    At0 = create_transposed_matrix(A0)
+    Gt0 = create_transposed_matrix(G0)
+    P1 = regularize_P(P0, zero(T))
     data = ProblemData{T,Ti}(
         P1,
         collect(c),
         A0,
         At0,
-        AtoAt,
         b0,
         G0,
         Gt0,
-        GtoGt,
         h0,
         Ti(l),
         qv,
         n,
         Ti(length(h0)),
         Ti(length(b0)),
-        Padded_idx,
         ScalingStats(T),
     )
     scaling = initialize_scaling(data)

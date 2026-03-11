@@ -67,7 +67,7 @@ end
     @test isapprox(soc.solution.x[1], 1.0; atol = 1e-6, rtol = 1e-6)
 end
 
-@testset "Warm starts and in-place updates" begin
+@testset "Warm starts" begin
     P = sparse([1, 2], [1, 2], [2.0, 2.0], 2, 2)
     c = [-1.0, -1.0]
     A = sparse([1, 1], [1, 2], [1.0, 1.0], 1, 2)
@@ -80,21 +80,24 @@ end
     @test solver.solution.status == JuliaQOCO.QOCO_SOLVED
     @test isapprox(solver.solution.x, [0.5, 0.5]; atol = 1e-6, rtol = 1e-6)
 
-    JuliaQOCO.update_vector_data!(solver; c = [-2.0, -1.0])
-    JuliaQOCO.solve!(solver)
-    @test solver.solution.status == JuliaQOCO.QOCO_SOLVED
-    @test isapprox(solver.solution.x, [0.75, 0.25]; atol = 1e-5, rtol = 1e-5)
+    cold_solver = JuliaQOCO.Solver(P, [-2.0, -1.0], A, b, G, h, 2, Int[])
+    JuliaQOCO.solve!(cold_solver)
+    @test cold_solver.solution.status == JuliaQOCO.QOCO_SOLVED
+    @test isapprox(cold_solver.solution.x, [0.75, 0.25]; atol = 1e-5, rtol = 1e-5)
 
-    JuliaQOCO.update_matrix_data!(solver; Ax = [1.0, 2.0])
-    JuliaQOCO.solve!(solver)
-    @test solver.solution.status == JuliaQOCO.QOCO_SOLVED
-    @test isapprox(solver.solution.x, [0.8, 0.1]; atol = 1e-5, rtol = 1e-5)
-    @test isapprox(solver.solution.s, [0.8, 0.1]; atol = 1e-5, rtol = 1e-5)
-
-    JuliaQOCO.warm_start!(solver; x = [0.8, 0.1], s = [0.8, 0.1], y = [0.6], z = [1.0, 1.0])
-    JuliaQOCO.solve!(solver)
-    @test solver.solution.status == JuliaQOCO.QOCO_SOLVED
-    @test isapprox(solver.solution.x, [0.8, 0.1]; atol = 1e-5, rtol = 1e-5)
+    warm_solver = JuliaQOCO.Solver(P, [-2.0, -1.0], A, b, G, h, 2, Int[])
+    JuliaQOCO.warm_start!(
+        warm_solver;
+        x = solver.solution.x,
+        s = solver.solution.s,
+        y = solver.solution.y,
+        z = solver.solution.z,
+    )
+    JuliaQOCO.solve!(warm_solver)
+    @test warm_solver.solution.status == JuliaQOCO.QOCO_SOLVED
+    @test isapprox(warm_solver.solution.x, [0.75, 0.25]; atol = 1e-5, rtol = 1e-5)
+    JuliaQOCO.clear_warmstart!(warm_solver)
+    @test !warm_solver.warmstart.active
 end
 
 end

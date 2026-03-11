@@ -86,12 +86,12 @@ MOI.supports(::Optimizer, ::MOI.Silent) = true
 MOI.supports(::Optimizer, ::MOI.RawOptimizerAttribute) = true
 MOI.supports(::Optimizer, ::MOI.SolverVersion) = true
 MOI.supports(::Optimizer, ::MOI.BarrierIterations) = true
-MOI.supports(::Optimizer{T}, ::MOI.ConstraintSet, ::Type{MOI.ConstraintIndex{MOI.VectorAffineFunction{T},MOI.Zeros}}) where {T} = true
-MOI.supports(::Optimizer{T}, ::MOI.ConstraintSet, ::Type{MOI.ConstraintIndex{MOI.VectorAffineFunction{T},MOI.Nonnegatives}}) where {T} = true
-MOI.supports(::Optimizer{T}, ::MOI.ConstraintSet, ::Type{MOI.ConstraintIndex{MOI.VectorAffineFunction{T},MOI.SecondOrderCone}}) where {T} = true
-MOI.supports(::Optimizer{T}, ::MOI.ConstraintSet, ::Type{MOI.ConstraintIndex{MOI.VectorOfVariables,MOI.Zeros}}) where {T} = true
-MOI.supports(::Optimizer{T}, ::MOI.ConstraintSet, ::Type{MOI.ConstraintIndex{MOI.VectorOfVariables,MOI.Nonnegatives}}) where {T} = true
-MOI.supports(::Optimizer{T}, ::MOI.ConstraintSet, ::Type{MOI.ConstraintIndex{MOI.VectorOfVariables,MOI.SecondOrderCone}}) where {T} = true
+MOI.supports(::Optimizer{T}, ::MOI.ConstraintSet, ::Type{MOI.ConstraintIndex{MOI.VectorAffineFunction{T},MOI.Zeros}}) where {T} = false
+MOI.supports(::Optimizer{T}, ::MOI.ConstraintSet, ::Type{MOI.ConstraintIndex{MOI.VectorAffineFunction{T},MOI.Nonnegatives}}) where {T} = false
+MOI.supports(::Optimizer{T}, ::MOI.ConstraintSet, ::Type{MOI.ConstraintIndex{MOI.VectorAffineFunction{T},MOI.SecondOrderCone}}) where {T} = false
+MOI.supports(::Optimizer{T}, ::MOI.ConstraintSet, ::Type{MOI.ConstraintIndex{MOI.VectorOfVariables,MOI.Zeros}}) where {T} = false
+MOI.supports(::Optimizer{T}, ::MOI.ConstraintSet, ::Type{MOI.ConstraintIndex{MOI.VectorOfVariables,MOI.Nonnegatives}}) where {T} = false
+MOI.supports(::Optimizer{T}, ::MOI.ConstraintSet, ::Type{MOI.ConstraintIndex{MOI.VectorOfVariables,MOI.SecondOrderCone}}) where {T} = false
 
 MOI.supports_constraint(::Optimizer{T}, ::Type{MOI.VectorAffineFunction{T}}, ::Type{MOI.Zeros}) where {T} = true
 MOI.supports_constraint(::Optimizer{T}, ::Type{MOI.VectorAffineFunction{T}}, ::Type{MOI.Nonnegatives}) where {T} = true
@@ -138,28 +138,28 @@ MOI.is_valid(opt::Optimizer, ci::MOI.ConstraintIndex) = MOI.is_valid(opt.model, 
 function MOI.add_variable(opt::Optimizer)
     _throw_if_structural_edit_attached(opt)
     vi = MOI.add_variable(opt.model)
-    _clear_results!(opt)
+    _reset_results!(opt)
     return vi
 end
 
 function MOI.add_variables(opt::Optimizer, n::Int)
     _throw_if_structural_edit_attached(opt)
     vis = MOI.add_variables(opt.model, n)
-    _clear_results!(opt)
+    _reset_results!(opt)
     return vis
 end
 
 function MOI.add_constrained_variable(opt::Optimizer, set::S) where {S<:MOI.AbstractScalarSet}
     _throw_if_structural_edit_attached(opt)
     result = MOI.add_constrained_variable(opt.model, set)
-    _clear_results!(opt)
+    _reset_results!(opt)
     return result
 end
 
 function MOI.add_constrained_variables(opt::Optimizer, set::S) where {S<:MOI.AbstractVectorSet}
     _throw_if_structural_edit_attached(opt)
     result = MOI.add_constrained_variables(opt.model, set)
-    _clear_results!(opt)
+    _reset_results!(opt)
     return result
 end
 
@@ -176,14 +176,14 @@ function MOI.add_constraint(
 ) where {T<:AbstractFloat,F<:MOI.AbstractFunction,S<:MOI.AbstractSet}
     opt.native_solver === nothing || throw(MOI.AddConstraintNotAllowed{F,S}(_structural_edit_message()))
     ci = MOI.add_constraint(opt.model, func, set)
-    _clear_results!(opt)
+    _reset_results!(opt)
     return ci
 end
 
 function MOI.delete(opt::Optimizer, vi::MOI.VariableIndex)
     opt.native_solver === nothing || throw(MOI.DeleteNotAllowed(vi, _structural_edit_message()))
     MOI.delete(opt.model, vi)
-    _clear_results!(opt)
+    _reset_results!(opt)
     return nothing
 end
 
@@ -192,14 +192,14 @@ function MOI.delete(opt::Optimizer, vis::Vector{MOI.VariableIndex})
         throw(MOI.DeleteNotAllowed(first(vis), _structural_edit_message()))
     end
     MOI.delete(opt.model, vis)
-    _clear_results!(opt)
+    _reset_results!(opt)
     return nothing
 end
 
 function MOI.delete(opt::Optimizer, ci::MOI.ConstraintIndex)
     opt.native_solver === nothing || throw(MOI.DeleteNotAllowed(ci, _structural_edit_message()))
     MOI.delete(opt.model, ci)
-    _clear_results!(opt)
+    _reset_results!(opt)
     return nothing
 end
 
@@ -208,7 +208,7 @@ function MOI.delete(opt::Optimizer, cis::Vector{CI}) where {CI<:MOI.ConstraintIn
         throw(MOI.DeleteNotAllowed(first(cis), _structural_edit_message()))
     end
     MOI.delete(opt.model, cis)
-    _clear_results!(opt)
+    _reset_results!(opt)
     return nothing
 end
 
@@ -218,31 +218,19 @@ MOI.get(opt::Optimizer, attr::MOI.AbstractConstraintAttribute, ci::MOI.Constrain
 
 function MOI.set(opt::Optimizer, attr::MOI.AbstractModelAttribute, value)
     result = MOI.set(opt.model, attr, value)
-    _clear_results!(opt)
+    _reset_results!(opt)
     return result
 end
 
 function MOI.set(opt::Optimizer, attr::MOI.AbstractVariableAttribute, vi::MOI.VariableIndex, value)
     result = MOI.set(opt.model, attr, vi, value)
-    _clear_results!(opt)
+    _reset_results!(opt)
     return result
 end
 
 function MOI.set(opt::Optimizer, attr::MOI.AbstractConstraintAttribute, ci::MOI.ConstraintIndex, value)
     result = MOI.set(opt.model, attr, ci, value)
-    _clear_results!(opt)
-    return result
-end
-
-function MOI.modify(opt::Optimizer, ci::MOI.ConstraintIndex, change::MOI.AbstractFunctionModification)
-    result = MOI.modify(opt.model, ci, change)
-    _clear_results!(opt)
-    return result
-end
-
-function MOI.modify(opt::Optimizer, attr::MOI.ObjectiveFunction, change::MOI.AbstractFunctionModification)
-    result = MOI.modify(opt.model, attr, change)
-    _clear_results!(opt)
+    _reset_results!(opt)
     return result
 end
 
@@ -538,89 +526,14 @@ function _constraint_data(
     return A, b, G, h, l, q, info
 end
 
-function _same_csc_pattern(A::SparseMatrixCSC, B::SparseMatrixCSC)
-    return size(A) == size(B) && A.colptr == B.colptr && A.rowval == B.rowval
-end
-
-function _same_original_P_pattern(
-    P::SparseMatrixCSC{T,Ti},
-    Preg::SparseMatrixCSC{T,Ti},
-    padded_idx::AbstractVector{Ti},
-) where {T<:AbstractFloat,Ti<:Integer}
-    size(P) == size(Preg) || return false
-    nnz(P) == nnz(Preg) - length(padded_idx) || return false
-    padded_pos = 1
-    next_padded = isempty(padded_idx) ? typemax(Ti) : padded_idx[padded_pos]
-    @inbounds for j in 1:size(P, 2)
-        src = P.colptr[j]
-        for k in Preg.colptr[j]:(Preg.colptr[j + 1] - 1)
-            if k == next_padded
-                padded_pos += 1
-                next_padded = padded_pos <= length(padded_idx) ? padded_idx[padded_pos] : typemax(Ti)
-                continue
-            end
-            src <= P.colptr[j + 1] - 1 || return false
-            P.rowval[src] == Preg.rowval[k] || return false
-            src += 1
-        end
-        src == P.colptr[j + 1] || return false
-    end
-    return true
-end
-
-function _can_update_native_solver(
-    solver::Solver{T},
-    P::SparseMatrixCSC{T},
-    A::SparseMatrixCSC{T},
-    G::SparseMatrixCSC{T},
-    l::Integer,
-    q::AbstractVector{<:Integer},
-    settings::Settings{T},
-) where {T<:AbstractFloat}
-    data = solver.data
-    solver.settings.kkt_static_reg == settings.kkt_static_reg || return false
-    data.n == size(P, 1) == size(P, 2) == size(A, 2) == size(G, 2) || return false
-    data.p == size(A, 1) || return false
-    data.m == size(G, 1) || return false
-    data.l == l || return false
-    data.q == q || return false
-    _same_csc_pattern(A, data.A) || return false
-    _same_csc_pattern(G, data.G) || return false
-    return _same_original_P_pattern(P, data.P, data.Padded_idx)
-end
-
-function _seed_from_previous_solution!(solver::Solver{T}, previous) where {T<:AbstractFloat}
-    previous isa Solver{T} || return solver
-    sol = previous.solution
-    sol.status == QOCO_UNSOLVED && return solver
-    has_nan(sol.x) && return solver
-    has_nan(sol.y) && return solver
-    length(sol.x) == length(solver.warmstart.x) || return solver
-    length(sol.y) == length(solver.warmstart.y) || return solver
-    warm_start!(solver; x = sol.x, y = sol.y)
-    return solver
-end
-
 function MOI.optimize!(opt::Optimizer{T}) where {T<:AbstractFloat}
-    previous_solver = opt.native_solver
-    previous_variables = opt.column_to_variable
+    _reset_results!(opt)
     variables, variable_to_column = _variable_columns(opt.model)
-    _clear_results!(opt)
     n = length(variables)
     P, c, constant, sign = _objective_data(opt.model, variable_to_column, n)
     A, b, G, h, l, q, info = _constraint_data(opt, variable_to_column, n)
-    solver = if previous_solver isa Solver{T} &&
-                previous_variables == variables &&
-                _can_update_native_solver(previous_solver, P, A, G, l, q, opt.settings)
-        previous_solver.settings = copy_settings(opt.settings)
-        update_matrix_data!(previous_solver; Px = P.nzval, Ax = A.nzval, Gx = G.nzval)
-        update_vector_data!(previous_solver; c = c, b = b, h = h)
-        solve!(previous_solver)
-    else
-        fresh_solver = Solver(P, c, A, b, G, h, l, q; settings = opt.settings)
-        _seed_from_previous_solution!(fresh_solver, previous_solver)
-        solve!(fresh_solver)
-    end
+    solver = Solver(P, c, A, b, G, h, l, q; settings = opt.settings)
+    solve!(solver)
     opt.native_solver = solver
     opt.constraint_info = info
     opt.objective_constant = constant

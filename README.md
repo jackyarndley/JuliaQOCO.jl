@@ -7,6 +7,12 @@ The package exposes:
 - a native solver API for QOCO-standard-form problems
 - a `MathOptInterface` / JuMP optimizer
 
+The JuMP/MOI interface is tuned for the caching-and-rebuild workflow used by
+`JuMP.Model(JuliaQOCO.Optimizer)`. Native fixed-pattern in-place update support
+has been removed from the public interface to avoid setup-time regressions in
+SCP-style rebuild loops, while manual native warm starts remain available via
+`warm_start!`.
+
 The implementation mirrors the upstream `qoco` solver structure closely:
 
 - sparse upper-triangular quadratic Hessian storage

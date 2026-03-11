@@ -17,18 +17,15 @@ mutable struct ProblemData{T<:AbstractFloat,Ti<:Integer}
     c::Vector{T}
     A::SparseMatrixCSC{T,Ti}
     At::SparseMatrixCSC{T,Ti}
-    AtoAt::Vector{Ti}
     b::Vector{T}
     G::SparseMatrixCSC{T,Ti}
     Gt::SparseMatrixCSC{T,Ti}
-    GtoGt::Vector{Ti}
     h::Vector{T}
     l::Ti
     q::Vector{Ti}
     n::Ti
     m::Ti
     p::Ti
-    Padded_idx::Vector{Ti}
     stats::ScalingStats{T}
 end
 
