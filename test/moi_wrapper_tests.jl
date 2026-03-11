@@ -27,6 +27,7 @@ const MOIU = MOI.Utilities
 
     @testset "Silent" begin
         opt = JuliaQOCO.Optimizer()
+        @test MOI.get(opt, MOI.Silent()) == false
         MOI.set(opt, MOI.Silent(), true)
         @test MOI.get(opt, MOI.Silent()) == true
     end

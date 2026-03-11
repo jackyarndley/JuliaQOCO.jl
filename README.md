@@ -13,7 +13,7 @@ The implementation mirrors the upstream `qoco` solver structure closely:
 - Ruiz equilibration
 - Nesterov-Todd scaling for SOCs
 - Mehrotra predictor-corrector updates
-- sparse KKT solves through `QDLDL.jl` with in-place numeric refactorization
+- sparse KKT solves through a vendored `QDLDL.jl` backend with in-place numeric refactorization
 
 ## Scope
 
@@ -32,6 +32,16 @@ with
 ```math
 \mathcal C = \mathbb{R}_+^l \times \mathcal{Q}^{q_1} \times \cdots \times \mathcal{Q}^{q_N}.
 ```
+
+## Verbose output
+
+The native solver and the `MathOptInterface` optimizer now print the upstream-style QOCO convergence table by default.
+
+- Native API: disable it with `Settings(verbose = false)`
+- Native API: redirect it with `Settings(output = io)` while keeping terminal output as the default via `stdout`
+- MOI / JuMP: disable it with `MOI.set(model, MOI.Silent(), true)`
+
+The bundled linear-system code is derived from `oxfordcontrol/QDLDL.jl` (Apache-2.0). See `licenses/QDLDL-LICENSE` for the vendored license text.
 
 ## Development
 

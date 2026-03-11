@@ -1,7 +1,7 @@
 function _refresh_static_kkt!(solver::Solver{T}) where {T<:AbstractFloat}
     solver.linsys.factor === nothing && return solver
     _fill_static_values!(solver.linsys.static_values, solver.data)
-    QDLDL.update_values!(solver.linsys.factor, solver.linsys.static2kkt, solver.linsys.static_values)
+    QDLDL.update_values_internal!(solver.linsys.factor, solver.linsys.static2kkt, solver.linsys.static_values)
     return solver
 end
 

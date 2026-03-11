@@ -5,6 +5,8 @@ using SparseArrays
 
 import JuliaQOCO
 
+quiet_settings() = JuliaQOCO.Settings{Float64}(; verbose = false)
+
 @testset "Cone kernels" begin
     x = [6.0, 7.0, 8.0, 1.0, 2.0, 3.0, 4.0, 5.0, 1.0, 2.0, 3.0, 4.0, 5.0]
     y = [9.0, 10.0, 11.0, 6.0, 7.0, 8.0, 9.0, 10.0, 6.0, 7.0, 8.0, 9.0, 10.0]
@@ -45,24 +47,44 @@ end
 @testset "Validation" begin
     P = sparse([1.0 0.0; 0.0 1.0])
     c = [1.0]
-    @test_throws ArgumentError JuliaQOCO.solve(P, c; l = 0, q = Int[])
+    @test_throws ArgumentError JuliaQOCO.solve(P, c; l = 0, q = Int[], settings = quiet_settings())
 
     G = sparse([1.0; 0.0;;])
     h = [1.0, 0.0]
-    @test_throws ArgumentError JuliaQOCO.solve(spzeros(1, 1), [1.0]; G = G, h = h, l = 0, q = Int[])
+    @test_throws ArgumentError JuliaQOCO.solve(spzeros(1, 1), [1.0]; G = G, h = h, l = 0, q = Int[], settings = quiet_settings())
+end
+
+@testset "Verbosity" begin
+    default_settings = JuliaQOCO.default_settings(Float64)
+    @test default_settings.verbose
+    @test default_settings.output === stdout
+
+    verbose_io = IOBuffer()
+    verbose_settings = JuliaQOCO.Settings{Float64}(; output = verbose_io)
+    JuliaQOCO.solve(spzeros(1, 1), [1.0]; G = sparse([-1.0;;]), h = [-1.0], l = 1, q = Int[], settings = verbose_settings)
+    verbose_output = String(take!(verbose_io))
+    @test occursin("QOCO - Quadratic Objective Conic Optimizer", verbose_output)
+    @test occursin("|  Iter  |", verbose_output)
+    @test occursin("status:", verbose_output)
+
+    quiet_io = IOBuffer()
+    quiet_settings = JuliaQOCO.Settings{Float64}(; verbose = false, output = quiet_io)
+    JuliaQOCO.solve(spzeros(1, 1), [1.0]; G = sparse([-1.0;;]), h = [-1.0], l = 1, q = Int[], settings = quiet_settings)
+    quiet_output = String(take!(quiet_io))
+    @test isempty(quiet_output)
 end
 
 @testset "Native solves" begin
-    lp = JuliaQOCO.solve(spzeros(1, 1), [1.0]; G = sparse([-1.0;;]), h = [-1.0], l = 1, q = Int[])
+    lp = JuliaQOCO.solve(spzeros(1, 1), [1.0]; G = sparse([-1.0;;]), h = [-1.0], l = 1, q = Int[], settings = quiet_settings())
     @test lp.solution.status == JuliaQOCO.QOCO_SOLVED
     @test isapprox(lp.solution.x[1], 1.0; atol = 1e-7, rtol = 1e-7)
 
-    qp = JuliaQOCO.solve(sparse([2.0;;]), [-4.0]; l = 0, q = Int[])
+    qp = JuliaQOCO.solve(sparse([2.0;;]), [-4.0]; l = 0, q = Int[], settings = quiet_settings())
     @test qp.solution.status == JuliaQOCO.QOCO_SOLVED
     @test isapprox(qp.solution.x[1], 2.0; atol = 1e-7, rtol = 1e-7)
     @test isapprox(qp.solution.obj, -4.0; atol = 1e-7, rtol = 1e-7)
 
-    soc = JuliaQOCO.solve(spzeros(1, 1), [1.0]; G = sparse([-1.0; 0.0;;]), h = [0.0, 1.0], l = 0, q = [2])
+    soc = JuliaQOCO.solve(spzeros(1, 1), [1.0]; G = sparse([-1.0; 0.0;;]), h = [0.0, 1.0], l = 0, q = [2], settings = quiet_settings())
     @test soc.solution.status == JuliaQOCO.QOCO_SOLVED
     @test isapprox(soc.solution.x[1], 1.0; atol = 1e-6, rtol = 1e-6)
 end
@@ -75,7 +97,7 @@ end
     G = sparse([1, 2], [1, 2], [-1.0, -1.0], 2, 2)
     h = [0.0, 0.0]
 
-    solver = JuliaQOCO.Solver(P, c, A, b, G, h, 2, Int[])
+    solver = JuliaQOCO.Solver(P, c, A, b, G, h, 2, Int[]; settings = quiet_settings())
     JuliaQOCO.solve!(solver)
     @test solver.solution.status == JuliaQOCO.QOCO_SOLVED
     @test isapprox(solver.solution.x, [0.5, 0.5]; atol = 1e-6, rtol = 1e-6)

@@ -5,7 +5,9 @@ using Printf
 using SparseArrays
 
 import MathOptInterface as MOI
-import QDLDL
+
+include("internal_qdldl.jl")
+const QDLDL = InternalQDLDL
 
 const MOIU = MOI.Utilities
 

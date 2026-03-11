@@ -20,10 +20,14 @@ function cone_product!(p::AbstractVector{T}, u::AbstractVector{T}, v::AbstractVe
     end
     idx = l + 1
     for q in qdims
-        p[idx] = dot(view(u, idx:(idx + q - 1)), view(v, idx:(idx + q - 1)))
+        acc = u[idx] * v[idx]
         @inbounds for k in 1:(q - 1)
-            p[idx + k] = u[idx] * v[idx + k] + v[idx] * u[idx + k]
+            uk = u[idx + k]
+            vk = v[idx + k]
+            acc += uk * vk
+            p[idx + k] = u[idx] * vk + v[idx] * uk
         end
+        p[idx] = acc
         idx += q
     end
     return p
@@ -107,7 +111,9 @@ function nt_multiply!(z::AbstractVector{T}, Wfull::AbstractVector{T}, x::Abstrac
     @inbounds for i in 1:data.l
         z[i] = Wfull[i] * x[i]
     end
-    fill!(view(z, (data.l + 1):length(z)), zero(T))
+    @inbounds for i in (data.l + 1):length(z)
+        z[i] = zero(T)
+    end
     for (block, q) in enumerate(data.q)
         idx = work.soc_offsets[block]
         offset = work.Wfull_offsets[block]
@@ -148,7 +154,11 @@ function compute_nt_scaling!(solver::Solver{T}) where {T<:AbstractFloat}
             work.zbar[k + 1] = zf * work.z[idx + k]
         end
 
-        gamma = sqrt(T(0.5) * (one(T) + dot(view(work.sbar, 1:q), view(work.zbar, 1:q))))
+        dot_sbar_zbar = zero(T)
+        @inbounds for k in 1:q
+            dot_sbar_zbar += work.sbar[k] * work.zbar[k]
+        end
+        gamma = sqrt(T(0.5) * (one(T) + dot_sbar_zbar))
         f = safe_div(one(T), T(2) * gamma)
         work.sbar[1] = f * (work.sbar[1] + work.zbar[1])
         @inbounds for k in 2:q

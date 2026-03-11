@@ -9,7 +9,8 @@ Base.@kwdef mutable struct Settings{T<:AbstractFloat}
     reltol::T = T(1e-7)
     abstol_inacc::T = T(1e-5)
     reltol_inacc::T = T(1e-5)
-    verbose::Bool = false
+    verbose::Bool = true
+    output::IO = stdout
 end
 
 function copy_settings(settings::Settings{T}) where {T<:AbstractFloat}
@@ -25,6 +26,7 @@ function copy_settings(settings::Settings{T}) where {T<:AbstractFloat}
         abstol_inacc = settings.abstol_inacc,
         reltol_inacc = settings.reltol_inacc,
         verbose = settings.verbose,
+        output = settings.output,
     )
 end
 

@@ -140,6 +140,8 @@ function _linsys(data::ProblemData{T,Ti}, settings::Settings{T}, work::Workspace
     copyto!(view(static2kkt, pos:(pos + length(At2kkt) - 1)), At2kkt)
     pos += length(At2kkt)
     copyto!(view(static2kkt, pos:(pos + length(Gt2kkt) - 1)), Gt2kkt)
+    nt2kkt = QDLDL.map_indices(factor, nt2kkt)
+    static2kkt = QDLDL.map_indices(factor, static2kkt)
     static_values = zeros(T, length(static2kkt))
     _fill_static_values!(static_values, data)
     return LinearSystem{T,Ti,typeof(factor)}(
@@ -178,41 +180,44 @@ function _print_header(solver::Solver{T}) where {T<:AbstractFloat}
     data = solver.data
     settings = solver.settings
     stats = data.stats
-    @printf("\n")
-    @printf("+-------------------------------------------------------+\n")
-    @printf("|     QOCO - Quadratic Objective Conic Optimizer        |\n")
-    @printf("|                    JuliaQOCO v%s                    |\n", string(pkgversion(@__MODULE__)))
-    @printf("+-------------------------------------------------------+\n")
-    @printf("| Problem Data:                                         |\n")
-    @printf("|     variables:        %-9d                       |\n", data.n)
-    @printf("|     constraints:      %-9d                       |\n", data.l + data.p + length(data.q))
-    @printf("|     eq constraints:   %-9d                       |\n", data.p)
-    @printf("|     ineq constraints: %-9d                       |\n", data.l)
-    @printf("|     soc constraints:  %-9d                       |\n", length(data.q))
-    @printf("|     nnz(P):           %-9d                       |\n", nnz(data.P))
-    @printf("|     nnz(A):           %-9d                       |\n", nnz(data.A))
-    @printf("|     nnz(G):           %-9d                       |\n", nnz(data.G))
-    @printf("| Scaling Statistics:                                   |\n")
-    @printf("|     Objective range      [%.0e, %.0e]               |\n", stats.obj_range_min, stats.obj_range_max)
-    @printf("|     Constraint range     [%.0e, %.0e]               |\n", stats.constraint_range_min, stats.constraint_range_max)
-    @printf("|     RHS range            [%.0e, %.0e]               |\n", stats.rhs_range_min, stats.rhs_range_max)
-    @printf("| Solver Settings:                                      |\n")
-    @printf("|     algebra: %-27s              |\n", "QDLDL.jl")
-    @printf("|     max_iters: %-3d abstol: %3.2e reltol: %3.2e  |\n", settings.max_iters, settings.abstol, settings.reltol)
-    @printf("|     abstol_inacc: %3.2e reltol_inacc: %3.2e     |\n", settings.abstol_inacc, settings.reltol_inacc)
-    @printf("|     bisect_iters: %-2d iter_ref_iters: %-2d               |\n", settings.bisect_iters, settings.iter_ref_iters)
-    @printf("|     ruiz_iters: %-2d kkt_static_reg: %3.2e           |\n", settings.ruiz_iters, settings.kkt_static_reg)
-    @printf("|     kkt_dynamic_reg: %3.2e                         |\n", settings.kkt_dynamic_reg)
-    @printf("+-------------------------------------------------------+\n")
-    println()
-    @printf("+--------+-----------+------------+------------+------------+-----------+-----------+\n")
-    @printf("|  Iter  |   Pcost   |    Pres    |    Dres    |     Gap    |     Mu    |    Step   |\n")
-    @printf("+--------+-----------+------------+------------+------------+-----------+-----------+\n")
+    io = settings.output
+    @printf(io, "\n")
+    @printf(io, "+-------------------------------------------------------+\n")
+    @printf(io, "|     QOCO - Quadratic Objective Conic Optimizer        |\n")
+    @printf(io, "|                    JuliaQOCO v%s                    |\n", string(pkgversion(@__MODULE__)))
+    @printf(io, "+-------------------------------------------------------+\n")
+    @printf(io, "| Problem Data:                                         |\n")
+    @printf(io, "|     variables:        %-9d                       |\n", data.n)
+    @printf(io, "|     constraints:      %-9d                       |\n", data.l + data.p + length(data.q))
+    @printf(io, "|     eq constraints:   %-9d                       |\n", data.p)
+    @printf(io, "|     ineq constraints: %-9d                       |\n", data.l)
+    @printf(io, "|     soc constraints:  %-9d                       |\n", length(data.q))
+    @printf(io, "|     nnz(P):           %-9d                       |\n", nnz(data.P) - length(data.Padded_idx))
+    @printf(io, "|     nnz(A):           %-9d                       |\n", nnz(data.A))
+    @printf(io, "|     nnz(G):           %-9d                       |\n", nnz(data.G))
+    @printf(io, "| Scaling Statistics:                                   |\n")
+    @printf(io, "|     Objective range      [%.0e, %.0e]               |\n", stats.obj_range_min, stats.obj_range_max)
+    @printf(io, "|     Constraint range     [%.0e, %.0e]               |\n", stats.constraint_range_min, stats.constraint_range_max)
+    @printf(io, "|     RHS range            [%.0e, %.0e]               |\n", stats.rhs_range_min, stats.rhs_range_max)
+    @printf(io, "| Solver Settings:                                      |\n")
+    @printf(io, "|     algebra: %-27s              |\n", "JuliaQOCO.QDLDL")
+    @printf(io, "|     max_iters: %-3d abstol: %3.2e reltol: %3.2e  |\n", settings.max_iters, settings.abstol, settings.reltol)
+    @printf(io, "|     abstol_inacc: %3.2e reltol_inacc: %3.2e     |\n", settings.abstol_inacc, settings.reltol_inacc)
+    @printf(io, "|     bisect_iters: %-2d iter_ref_iters: %-2d               |\n", settings.bisect_iters, settings.iter_ref_iters)
+    @printf(io, "|     ruiz_iters: %-2d kkt_static_reg: %3.2e           |\n", settings.ruiz_iters, settings.kkt_static_reg)
+    @printf(io, "|     kkt_dynamic_reg: %3.2e                         |\n", settings.kkt_dynamic_reg)
+    @printf(io, "+-------------------------------------------------------+\n")
+    println(io)
+    @printf(io, "+--------+-----------+------------+------------+------------+-----------+-----------+\n")
+    @printf(io, "|  Iter  |   Pcost   |    Pres    |    Dres    |     Gap    |     Mu    |    Step   |\n")
+    @printf(io, "+--------+-----------+------------+------------+------------+-----------+-----------+\n")
     return nothing
 end
 
 function _log_iter(solver::Solver{T}) where {T<:AbstractFloat}
+    io = solver.settings.output
     @printf(
+        io,
         "|   %2d   | %+.2e | %+.3e | %+.3e | %+.3e | %+.2e |   %.3f   |\n",
         solver.solution.iters,
         solver.solution.obj,
@@ -222,22 +227,23 @@ function _log_iter(solver::Solver{T}) where {T<:AbstractFloat}
         solver.work.mu,
         solver.work.a,
     )
-    @printf("+--------+-----------+------------+------------+------------+-----------+-----------+\n")
+    @printf(io, "+--------+-----------+------------+------------+------------+-----------+-----------+\n")
     return nothing
 end
 
 function _print_footer(solver::Solver{T}) where {T<:AbstractFloat}
     sol = solver.solution
-    @printf("\n")
-    @printf("status:                %s\n", status_string(sol.status, sol.status_detail))
-    @printf("number of iterations:  %d\n", sol.iters)
-    @printf("objective:             %+.6e\n", sol.obj)
-    @printf("primal residual:       %.3e\n", sol.pres)
-    @printf("dual residual:         %.3e\n", sol.dres)
-    @printf("duality gap:           %.3e\n", sol.gap)
-    @printf("setup time:            %.2e sec\n", sol.setup_time_sec)
-    @printf("solve time:            %.2e sec\n", sol.solve_time_sec)
-    @printf("\n")
+    io = solver.settings.output
+    @printf(io, "\n")
+    @printf(io, "status:                %s\n", status_string(sol.status, sol.status_detail))
+    @printf(io, "number of iterations:  %d\n", sol.iters)
+    @printf(io, "objective:             %+.6e\n", sol.obj)
+    @printf(io, "primal residual:       %.3e\n", sol.pres)
+    @printf(io, "dual residual:         %.3e\n", sol.dres)
+    @printf(io, "duality gap:           %.3e\n", sol.gap)
+    @printf(io, "setup time:            %.2e sec\n", sol.setup_time_sec)
+    @printf(io, "solve time:            %.2e sec\n", sol.solve_time_sec)
+    @printf(io, "\n")
     return nothing
 end
 

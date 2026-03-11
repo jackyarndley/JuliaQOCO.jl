@@ -141,7 +141,7 @@ function update_nt_block!(solver::Solver{T}) where {T<:AbstractFloat}
     @inbounds for pos in linsys.ntdiag_positions
         linsys.nt_values[pos] -= solver.settings.kkt_static_reg
     end
-    QDLDL.update_values!(linsys.factor, linsys.nt2kkt, linsys.nt_values)
+    QDLDL.update_values_internal!(linsys.factor, linsys.nt2kkt, linsys.nt_values)
     QDLDL.refactor!(linsys.factor)
     return nothing
 end
