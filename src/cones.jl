@@ -129,6 +129,28 @@ function nt_multiply!(z::AbstractVector{T}, Wfull::AbstractVector{T}, x::Abstrac
     return z
 end
 
+function nt_multiply_from!(z::AbstractVector{T}, Wfull::AbstractVector{T}, x::AbstractVector{T}, xoffset::Int, data::ProblemData{T}, work::Workspace{T,Ti}) where {T<:AbstractFloat,Ti<:Integer}
+    @inbounds for i in 1:data.l
+        z[i] = Wfull[i] * x[xoffset + i - 1]
+    end
+    @inbounds for i in (data.l + 1):length(z)
+        z[i] = zero(T)
+    end
+    for (block, q) in enumerate(data.q)
+        idx = work.soc_offsets[block]
+        offset = work.Wfull_offsets[block]
+        @inbounds for j in 0:(q - 1)
+            acc = zero(T)
+            coloff = offset + j * q
+            for k in 0:(q - 1)
+                acc += Wfull[coloff + k] * x[xoffset + idx + k - 1]
+            end
+            z[idx + j] = acc
+        end
+    end
+    return z
+end
+
 function compute_nt_scaling!(solver::Solver{T}) where {T<:AbstractFloat}
     data = solver.data
     work = solver.work
@@ -173,6 +195,7 @@ function compute_nt_scaling!(solver::Solver{T}) where {T<:AbstractFloat}
 
         scale = sqrt(safe_div(s_scal, z_scal))
         invscale = safe_div(one(T), scale)
+        scale2 = scale * scale
         shift = 0
         @inbounds for j in 1:q
             for k in 1:j
@@ -197,14 +220,24 @@ function compute_nt_scaling!(solver::Solver{T}) where {T<:AbstractFloat}
             end
         end
 
+        gamma_bar = work.zbar[1]
+        gamma2 = gamma_bar * gamma_bar
+        tail_norm2 = max(gamma2 - one(T), zero(T))
         shift = 0
         @inbounds for j in 1:q
             for k in 1:j
-                acc = zero(T)
-                basej = foffset + (j - 1) * q
-                basek = foffset + (k - 1) * q
-                for t in 0:(q - 1)
-                    acc += work.Wfull[basej + t] * work.Wfull[basek + t]
+                acc = if j == 1 && k == 1
+                    scale2 * (one(T) + T(8) * gamma2 * tail_norm2)
+                elseif k == 1
+                    zj = work.zbar[j]
+                    scale2 * (T(4) * gamma_bar * (T(2) * gamma2 - one(T)) * zj)
+                elseif j == k
+                    zj = work.zbar[j]
+                    scale2 * (one(T) + T(8) * gamma2 * zj * zj)
+                else
+                    zj = work.zbar[j]
+                    zk = work.zbar[k]
+                    scale2 * (T(8) * gamma2 * zj * zk)
                 end
                 work.WtW[toffset + shift] = acc
                 shift += 1
@@ -238,9 +271,24 @@ function exact_linesearch(u::AbstractVector{T}, Du::AbstractVector{T}, l::Int, f
     return -f < minval ? f : -safe_div(f, minval)
 end
 
+function exact_linesearch_from(u::AbstractVector{T}, Du::AbstractVector{T}, Du_offset::Int, l::Int, f::T) where {T<:AbstractFloat}
+    minval = zero(T)
+    @inbounds for i in 1:l
+        dui = Du[Du_offset + i - 1]
+        if dui < minval * u[i]
+            minval = dui / u[i]
+        end
+    end
+    return -f < minval ? f : -safe_div(f, minval)
+end
+
 function bisection_search!(solver::Solver{T}, u::AbstractVector{T}, Du::AbstractVector{T}, f::T) where {T<:AbstractFloat}
     work = solver.work
     data = solver.data
+    axpy_to!(work.ubuff1, safe_div(one(T), f), Du, u)
+    if cone_residual(work.ubuff1, data.l, data.q) < zero(T)
+        return one(T)
+    end
     al = zero(T)
     au = one(T)
     a = zero(T)
@@ -256,6 +304,32 @@ function bisection_search!(solver::Solver{T}, u::AbstractVector{T}, Du::Abstract
     return al
 end
 
+function bisection_search_from!(solver::Solver{T}, u::AbstractVector{T}, Du::AbstractVector{T}, Du_offset::Int, f::T) where {T<:AbstractFloat}
+    work = solver.work
+    data = solver.data
+    axpy_to_from!(work.ubuff1, safe_div(one(T), f), Du, Du_offset, u)
+    if cone_residual(work.ubuff1, data.l, data.q) < zero(T)
+        return one(T)
+    end
+    al = zero(T)
+    au = one(T)
+    a = zero(T)
+    for _ in 1:solver.settings.bisect_iters
+        a = T(0.5) * (al + au)
+        axpy_to_from!(work.ubuff1, safe_div(a, f), Du, Du_offset, u)
+        if cone_residual(work.ubuff1, data.l, data.q) >= zero(T)
+            au = a
+        else
+            al = a
+        end
+    end
+    return al
+end
+
 function linesearch!(solver::Solver{T}, u::AbstractVector{T}, Du::AbstractVector{T}, f::T) where {T<:AbstractFloat}
     return isempty(solver.data.q) ? exact_linesearch(u, Du, solver.data.l, f) : bisection_search!(solver, u, Du, f)
+end
+
+function linesearch_from!(solver::Solver{T}, u::AbstractVector{T}, Du::AbstractVector{T}, Du_offset::Int, f::T) where {T<:AbstractFloat}
+    return isempty(solver.data.q) ? exact_linesearch_from(u, Du, Du_offset, solver.data.l, f) : bisection_search_from!(solver, u, Du, Du_offset, f)
 end

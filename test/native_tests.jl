@@ -74,6 +74,25 @@ end
     @test isempty(quiet_output)
 end
 
+@testset "Profiling" begin
+    profiled = JuliaQOCO.solve(
+        spzeros(1, 1),
+        [1.0];
+        G = sparse([-1.0;;]),
+        h = [-1.0],
+        l = 1,
+        q = Int[],
+        settings = JuliaQOCO.Settings{Float64}(; verbose = false, profile = true),
+    )
+    profile = profiled.solution.profile
+    @test profile.problem_data_time_sec >= 0.0
+    @test profile.workspace_time_sec >= 0.0
+    @test profile.linsys_time_sec >= 0.0
+    @test profile.initialize_time_sec >= 0.0
+    @test profile.linsys_solves >= 1
+    @test profile.nt_refactors >= 1
+end
+
 @testset "Native solves" begin
     lp = JuliaQOCO.solve(spzeros(1, 1), [1.0]; G = sparse([-1.0;;]), h = [-1.0], l = 1, q = Int[], settings = quiet_settings())
     @test lp.solution.status == JuliaQOCO.QOCO_SOLVED
@@ -87,6 +106,34 @@ end
     soc = JuliaQOCO.solve(spzeros(1, 1), [1.0]; G = sparse([-1.0; 0.0;;]), h = [0.0, 1.0], l = 0, q = [2], settings = quiet_settings())
     @test soc.solution.status == JuliaQOCO.QOCO_SOLVED
     @test isapprox(soc.solution.x[1], 1.0; atol = 1e-6, rtol = 1e-6)
+end
+
+@testset "SOC line search" begin
+    solver = JuliaQOCO.Solver(spzeros(1, 1), [1.0], nothing, nothing, sparse([-1.0; 0.0;;]), [0.0, 1.0], 0, [2]; settings = quiet_settings())
+    u = [2.0, 0.5]
+    Du = [-1.1, 0.7]
+    step = JuliaQOCO.linesearch!(solver, u, Du, 0.99)
+    trial = u .+ step .* Du
+    @test JuliaQOCO.cone_residual(trial, 0, [2]) < 0.0
+end
+
+@testset "NT scaling consistency" begin
+    P = spzeros(2, 2)
+    c = [0.0, 0.0]
+    G = sparse([1, 2], [1, 2], [-1.0, -1.0], 2, 2)
+    h = [1.0, 0.5]
+    solver = JuliaQOCO.Solver(P, c, nothing, nothing, G, h, 0, [2]; settings = quiet_settings())
+    solver.work.s .= [2.0, 0.25]
+    solver.work.z .= [1.5, 0.1]
+    JuliaQOCO.compute_nt_scaling!(solver)
+    q = solver.data.q[1]
+    offset = solver.work.Wfull_offsets[1]
+    tri_offset = solver.work.Wtri_offsets[1]
+    Wblock = reshape(copy(@view solver.work.Wfull[offset:(offset + q * q - 1)]), q, q)
+    gram = transpose(Wblock) * Wblock
+    expected = [gram[j, k] for j in 1:q for k in 1:j]
+    actual = solver.work.WtW[tri_offset:(tri_offset + length(expected) - 1)]
+    @test isapprox(actual, expected; atol = 1e-10, rtol = 1e-10)
 end
 
 @testset "Warm starts and in-place updates" begin

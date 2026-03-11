@@ -94,12 +94,21 @@ function _problem_data(
         Ti(length(b0)),
         Padded_idx,
         ScalingStats(T),
+        false,
     )
     scaling = initialize_scaling(data)
     ruiz_equilibration!(data, scaling, settings.ruiz_iters)
     regularize_existing_P!(data.P, settings.kkt_static_reg)
-    data.stats = compute_scaling_statistics(data)
     return data, scaling
+end
+
+function _refresh_scaling_stats!(solver::Solver)
+    data = solver.data
+    if data.stats_dirty
+        data.stats = compute_scaling_statistics(data)
+        data.stats_dirty = false
+    end
+    return data.stats
 end
 
 function _fill_static_values!(dest::AbstractVector{T}, data::ProblemData{T}) where {T<:AbstractFloat}
@@ -165,13 +174,22 @@ function Solver(
     q::AbstractVector{<:Integer};
     settings::Settings{T} = default_settings(T),
 ) where {T<:AbstractFloat,Ti<:Integer}
-    t0 = time()
     validate_settings(settings)
+    t0 = time_ns()
+    tphase = time_ns()
     data, scaling = _problem_data(P, c, A, b, G, h, l, q, settings)
+    problem_data_time_sec = elapsed_time_sec(tphase)
+    tphase = time_ns()
     work = _workspace(data)
+    workspace_time_sec = elapsed_time_sec(tphase)
+    tphase = time_ns()
     linsys = _linsys(data, settings, work)
+    linsys_time_sec = elapsed_time_sec(tphase)
     sol = Solution(T, data.n, data.m, data.p)
-    sol.setup_time_sec = time() - t0
+    sol.setup_time_sec = elapsed_time_sec(t0)
+    sol.profile.problem_data_time_sec = problem_data_time_sec
+    sol.profile.workspace_time_sec = workspace_time_sec
+    sol.profile.linsys_time_sec = linsys_time_sec
     warmstart = Warmstart(T, data.n, data.m, data.p)
     return Solver{T,Ti,typeof(linsys.factor)}(copy_settings(settings), data, scaling, work, linsys, sol, warmstart)
 end
@@ -179,12 +197,12 @@ end
 function _print_header(solver::Solver{T}) where {T<:AbstractFloat}
     data = solver.data
     settings = solver.settings
-    stats = data.stats
+    stats = _refresh_scaling_stats!(solver)
     io = settings.output
     @printf(io, "\n")
     @printf(io, "+-------------------------------------------------------+\n")
     @printf(io, "|     QOCO - Quadratic Objective Conic Optimizer        |\n")
-    @printf(io, "|                    JuliaQOCO v%s                    |\n", string(pkgversion(@__MODULE__)))
+    @printf(io, "|                    JuliaQOCO v%s                   |\n", string(pkgversion(@__MODULE__)))
     @printf(io, "+-------------------------------------------------------+\n")
     @printf(io, "| Problem Data:                                         |\n")
     @printf(io, "|     variables:        %-9d                       |\n", data.n)
@@ -204,6 +222,7 @@ function _print_header(solver::Solver{T}) where {T<:AbstractFloat}
     @printf(io, "|     max_iters: %-3d abstol: %3.2e reltol: %3.2e  |\n", settings.max_iters, settings.abstol, settings.reltol)
     @printf(io, "|     abstol_inacc: %3.2e reltol_inacc: %3.2e     |\n", settings.abstol_inacc, settings.reltol_inacc)
     @printf(io, "|     bisect_iters: %-2d iter_ref_iters: %-2d               |\n", settings.bisect_iters, settings.iter_ref_iters)
+    @printf(io, "|     iter_ref_tol: %3.2e profile: %-5s               |\n", settings.iter_ref_tol, settings.profile ? "true" : "false")
     @printf(io, "|     ruiz_iters: %-2d kkt_static_reg: %3.2e           |\n", settings.ruiz_iters, settings.kkt_static_reg)
     @printf(io, "|     kkt_dynamic_reg: %3.2e                         |\n", settings.kkt_dynamic_reg)
     @printf(io, "+-------------------------------------------------------+\n")
@@ -243,6 +262,18 @@ function _print_footer(solver::Solver{T}) where {T<:AbstractFloat}
     @printf(io, "duality gap:           %.3e\n", sol.gap)
     @printf(io, "setup time:            %.2e sec\n", sol.setup_time_sec)
     @printf(io, "solve time:            %.2e sec\n", sol.solve_time_sec)
+    if solver.settings.profile
+        profile = sol.profile
+        @printf(io, "problem data time:     %.2e sec\n", profile.problem_data_time_sec)
+        @printf(io, "workspace time:        %.2e sec\n", profile.workspace_time_sec)
+        @printf(io, "linsys setup time:     %.2e sec\n", profile.linsys_time_sec)
+        @printf(io, "initialize time:       %.2e sec\n", profile.initialize_time_sec)
+        @printf(io, "residual/check time:   %.2e / %.2e sec\n", profile.residual_time_sec, profile.stopping_time_sec)
+        @printf(io, "nt scale/update time:  %.2e / %.2e sec\n", profile.nt_scaling_time_sec, profile.nt_update_time_sec)
+        @printf(io, "predictor time:        %.2e sec\n", profile.predictor_time_sec)
+        @printf(io, "linsys solve/refine:   %.2e / %.2e sec\n", profile.linsys_solve_time_sec, profile.linsys_refine_time_sec)
+        @printf(io, "linsys solves/refacs:  %d / %d\n", profile.linsys_solves, profile.nt_refactors)
+    end
     @printf(io, "\n")
     return nothing
 end
@@ -252,7 +283,8 @@ function solve!(solver::Solver{T}) where {T<:AbstractFloat}
     solver.solution.status = QOCO_UNSOLVED
     solver.solution.status_detail = ""
     solver.solution.iters = 0
-    t0 = time()
+    reset_solve_profile!(solver.solution.profile)
+    t0 = time_ns()
     if solver.settings.verbose
         _print_header(solver)
     end
@@ -263,22 +295,32 @@ function solve!(solver::Solver{T}) where {T<:AbstractFloat}
         solver.solution.pres = zero(T)
         solver.solution.dres = zero(T)
         solver.solution.gap = zero(T)
-        solver.solution.solve_time_sec = time() - t0
+        solver.solution.solve_time_sec = elapsed_time_sec(t0)
         _cache_solution_as_warmstart!(solver)
         if solver.settings.verbose
             _print_footer(solver)
         end
         return solver
     end
+    tphase = time_ns()
     initialize_ipm!(solver)
+    solver.solution.profile.initialize_time_sec += elapsed_time_sec(tphase)
 
     for iter in 1:solver.settings.max_iters
+        tphase = time_ns()
         compute_kkt_residual!(solver)
+        solver.solution.profile.residual_time_sec += elapsed_time_sec(tphase)
+        tphase = time_ns()
         compute_objective!(solver)
+        solver.solution.profile.objective_time_sec += elapsed_time_sec(tphase)
+        tphase = time_ns()
         compute_mu!(solver)
+        solver.solution.profile.mu_time_sec += elapsed_time_sec(tphase)
 
+        tphase = time_ns()
         if check_stopping!(solver)
-            solver.solution.solve_time_sec = time() - t0
+            solver.solution.profile.stopping_time_sec += elapsed_time_sec(tphase)
+            solver.solution.solve_time_sec = elapsed_time_sec(t0)
             solver.solution.iters = iter - 1
             unscaled_solution!(solver.solution, solver.data, solver.scaling, solver.work)
             _cache_solution_as_warmstart!(solver)
@@ -287,10 +329,17 @@ function solve!(solver::Solver{T}) where {T<:AbstractFloat}
             end
             return solver
         end
+        solver.solution.profile.stopping_time_sec += elapsed_time_sec(tphase)
 
+        tphase = time_ns()
         compute_nt_scaling!(solver)
+        solver.solution.profile.nt_scaling_time_sec += elapsed_time_sec(tphase)
+        tphase = time_ns()
         update_nt_block!(solver)
+        solver.solution.profile.nt_update_time_sec += elapsed_time_sec(tphase)
+        tphase = time_ns()
         predictor_corrector!(solver)
+        solver.solution.profile.predictor_time_sec += elapsed_time_sec(tphase)
         solver.solution.iters = iter
         if solver.settings.verbose
             _log_iter(solver)
@@ -299,7 +348,7 @@ function solve!(solver::Solver{T}) where {T<:AbstractFloat}
 
     solver.solution.status = QOCO_MAX_ITER
     solver.solution.status_detail = "reached iteration limit"
-    solver.solution.solve_time_sec = time() - t0
+    solver.solution.solve_time_sec = elapsed_time_sec(t0)
     unscaled_solution!(solver.solution, solver.data, solver.scaling, solver.work)
     _cache_solution_as_warmstart!(solver)
     if solver.settings.verbose

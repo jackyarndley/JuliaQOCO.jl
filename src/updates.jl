@@ -132,7 +132,7 @@ function update_vector_data!(
         copyto!(data.h, h)
         ew_product!(data.h, data.h, scaling.Fruiz)
     end
-    data.stats = compute_scaling_statistics(data)
+    data.stats_dirty = true
     return solver
 end
 
@@ -198,7 +198,6 @@ function update_matrix_data!(
 
     ruiz_equilibration!(data, solver.scaling, solver.settings.ruiz_iters)
     regularize_existing_P!(data.P, solver.settings.kkt_static_reg)
-    data.stats = compute_scaling_statistics(data)
     _refresh_static_kkt!(solver)
     return solver
 end

@@ -50,3 +50,17 @@ Run the package tests with:
 ```julia
 julia --project=. -e "using Pkg; Pkg.test()"
 ```
+
+For solver work, keep the inner loop on the native path and defer the full MOI suite until a checkpoint:
+
+```julia
+julia --project=. -e "using Pkg; Pkg.test(; test_args=[\"native\"])"
+```
+
+The solver also now supports lightweight built-in timing breakdowns through `Settings(profile = true)`, which records setup, KKT, scaling, stopping, predictor-corrector, and linear-solve timings on `solver.solution.profile`.
+
+For repeated-solve benchmarking without the MOI wrapper, run:
+
+```julia
+julia --project=. benchmark/native_repeated_solves.jl
+```

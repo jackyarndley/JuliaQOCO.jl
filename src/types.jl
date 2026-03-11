@@ -12,6 +12,27 @@ function ScalingStats(::Type{T}) where {T<:AbstractFloat}
     return ScalingStats{T}(z, z, z, z, z, z)
 end
 
+mutable struct SolveProfile
+    problem_data_time_sec::Float64
+    workspace_time_sec::Float64
+    linsys_time_sec::Float64
+    initialize_time_sec::Float64
+    residual_time_sec::Float64
+    objective_time_sec::Float64
+    mu_time_sec::Float64
+    stopping_time_sec::Float64
+    nt_scaling_time_sec::Float64
+    nt_update_time_sec::Float64
+    predictor_time_sec::Float64
+    linsys_solve_time_sec::Float64
+    linsys_refine_time_sec::Float64
+    linsys_solves::Int
+    linsys_refinements::Int
+    nt_refactors::Int
+end
+
+SolveProfile() = SolveProfile(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0)
+
 mutable struct ProblemData{T<:AbstractFloat,Ti<:Integer}
     P::SparseMatrixCSC{T,Ti}
     c::Vector{T}
@@ -30,6 +51,7 @@ mutable struct ProblemData{T<:AbstractFloat,Ti<:Integer}
     p::Ti
     Padded_idx::Vector{Ti}
     stats::ScalingStats{T}
+    stats_dirty::Bool
 end
 
 mutable struct Scaling{T<:AbstractFloat}
@@ -90,11 +112,12 @@ mutable struct Solution{T<:AbstractFloat}
     gap::T
     status::SolveStatus
     status_detail::String
+    profile::SolveProfile
 end
 
 function Solution(::Type{T}, n::Integer, m::Integer, p::Integer) where {T<:AbstractFloat}
     z = zero(T)
-    return Solution{T}(zeros(T, n), zeros(T, m), zeros(T, p), zeros(T, m), 0, 0.0, 0.0, z, z, z, z, QOCO_UNSOLVED, "")
+    return Solution{T}(zeros(T, n), zeros(T, m), zeros(T, p), zeros(T, m), 0, 0.0, 0.0, z, z, z, z, QOCO_UNSOLVED, "", SolveProfile())
 end
 
 mutable struct LinearSystem{T<:AbstractFloat,Ti<:Integer,F}

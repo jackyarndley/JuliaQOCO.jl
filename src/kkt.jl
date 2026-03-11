@@ -143,6 +143,7 @@ function update_nt_block!(solver::Solver{T}) where {T<:AbstractFloat}
     end
     QDLDL.update_values_internal!(linsys.factor, linsys.nt2kkt, linsys.nt_values)
     QDLDL.refactor!(linsys.factor)
+    solver.solution.profile.nt_refactors += 1
     return nothing
 end
 
@@ -179,14 +180,26 @@ function kkt_multiply!(y::AbstractVector{T}, x::AbstractVector{T}, data::Problem
 end
 
 function solve_linsys!(solver::Solver{T}, rhs::AbstractVector{T}, x::AbstractVector{T}) where {T<:AbstractFloat}
+    profile = solver.solution.profile
     copyto!(x, rhs)
+    tsolve = time_ns()
     QDLDL.solve!(solver.linsys.factor, x)
+    profile.linsys_solve_time_sec += elapsed_time_sec(tsolve)
+    profile.linsys_solves += 1
+
+    solver.settings.iter_ref_iters == 0 && return x
+
+    rhs_norm = max(one(T), inf_norm(rhs))
     for _ in 1:solver.settings.iter_ref_iters
         kkt_multiply!(solver.work.xyzbuff1, x, solver.data, solver.work)
         @inbounds for i in eachindex(x)
             solver.work.xyzbuff1[i] = rhs[i] - solver.work.xyzbuff1[i]
         end
+        inf_norm(solver.work.xyzbuff1) <= solver.settings.iter_ref_tol * rhs_norm && break
+        trefine = time_ns()
         QDLDL.solve!(solver.linsys.factor, solver.work.xyzbuff1)
+        profile.linsys_refine_time_sec += elapsed_time_sec(trefine)
+        profile.linsys_refinements += 1
         add_scaled!(x, one(T), solver.work.xyzbuff1)
     end
     return x
@@ -202,14 +215,14 @@ function initialize_ipm!(solver::Solver{T}) where {T<:AbstractFloat}
     update_nt_block!(solver)
     work.a = one(T)
 
-    copy_negate!(view(work.rhs, 1:data.n), data.c)
-    copyto!(view(work.rhs, (data.n + 1):(data.n + data.p)), data.b)
-    copyto!(view(work.rhs, (data.n + data.p + 1):(data.n + data.p + data.m)), data.h)
+    copy_negate_to!(work.rhs, 1, data.c, data.n)
+    copyto!(work.rhs, data.n + 1, data.b, 1, data.p)
+    copyto!(work.rhs, data.n + data.p + 1, data.h, 1, data.m)
 
     solve_linsys!(solver, work.rhs, work.xyz)
-    copyto!(work.x, view(work.xyz, 1:data.n))
-    copyto!(work.y, view(work.xyz, (data.n + 1):(data.n + data.p)))
-    copyto!(work.z, view(work.xyz, (data.n + data.p + 1):(data.n + data.p + data.m)))
+    copyto!(work.x, 1, work.xyz, 1, data.n)
+    copyto!(work.y, 1, work.xyz, data.n + 1, data.p)
+    copyto!(work.z, 1, work.xyz, data.n + data.p + 1, data.m)
     copy_negate!(work.s, work.z)
     bring2cone!(work.s, data.l, data.q)
     bring2cone!(work.z, data.l, data.q)
@@ -219,16 +232,16 @@ end
 function compute_kkt_residual!(solver::Solver{T}) where {T<:AbstractFloat}
     data = solver.data
     work = solver.work
-    copyto!(view(work.xyzbuff1, 1:data.n), work.x)
-    copyto!(view(work.xyzbuff1, (data.n + 1):(data.n + data.p)), work.y)
-    copyto!(view(work.xyzbuff1, (data.n + data.p + 1):(data.n + data.p + data.m)), work.z)
+    copyto!(work.xyzbuff1, 1, work.x, 1, data.n)
+    copyto!(work.xyzbuff1, data.n + 1, work.y, 1, data.p)
+    copyto!(work.xyzbuff1, data.n + data.p + 1, work.z, 1, data.m)
     kkt_multiply!(work.kktres, work.xyzbuff1, data, work; include_nt = false)
 
-    add_scaled!(view(work.kktres, 1:data.n), one(T), data.c)
-    add_scaled!(view(work.kktres, 1:data.n), -solver.settings.kkt_static_reg, work.x)
-    add_scaled!(view(work.kktres, (data.n + 1):(data.n + data.p)), -one(T), data.b)
-    add_scaled!(view(work.kktres, (data.n + data.p + 1):(data.n + data.p + data.m)), -one(T), data.h)
-    add_scaled!(view(work.kktres, (data.n + data.p + 1):(data.n + data.p + data.m)), one(T), work.s)
+    add_scaled_to!(work.kktres, 1, one(T), data.c, data.n)
+    add_scaled_to!(work.kktres, 1, -solver.settings.kkt_static_reg, work.x, data.n)
+    add_scaled_to!(work.kktres, data.n + 1, -one(T), data.b, data.p)
+    add_scaled_to!(work.kktres, data.n + data.p + 1, -one(T), data.h, data.m)
+    add_scaled_to!(work.kktres, data.n + data.p + 1, one(T), work.s, data.m)
     return nothing
 end
 
@@ -252,7 +265,7 @@ function construct_kkt_aff_rhs!(solver::Solver{T}) where {T<:AbstractFloat}
     work = solver.work
     copy_negate!(work.rhs, work.kktres)
     nt_multiply!(work.ubuff1, work.Wfull, work.lambda, data, work)
-    add_scaled!(view(work.rhs, (data.n + data.p + 1):(data.n + data.p + data.m)), one(T), work.ubuff1)
+    add_scaled_to!(work.rhs, data.n + data.p + 1, one(T), work.ubuff1, data.m)
     return nothing
 end
 
@@ -261,7 +274,7 @@ function construct_kkt_comb_rhs!(solver::Solver{T}) where {T<:AbstractFloat}
     work = solver.work
     copy_negate!(work.rhs, work.kktres)
     nt_multiply!(work.ubuff1, work.Winvfull, work.Ds, data, work)
-    nt_multiply!(work.ubuff2, work.Wfull, view(work.xyz, (data.n + data.p + 1):(data.n + data.p + data.m)), data, work)
+    nt_multiply_from!(work.ubuff2, work.Wfull, work.xyz, data.n + data.p + 1, data, work)
     cone_product!(work.ubuff3, work.ubuff1, work.ubuff2, data.l, data.q)
     subtract_e!(work.ubuff3, work.sigma * work.mu, data.l, data.q)
     cone_product!(work.ubuff1, work.lambda, work.lambda, data.l, data.q)
@@ -269,7 +282,7 @@ function construct_kkt_comb_rhs!(solver::Solver{T}) where {T<:AbstractFloat}
     add_scaled!(work.Ds, -one(T), work.ubuff3)
     cone_division!(work.ubuff2, work.lambda, work.Ds, data.l, data.q)
     nt_multiply!(work.ubuff1, work.Wfull, work.ubuff2, data, work)
-    add_scaled!(view(work.rhs, (data.n + data.p + 1):(data.n + data.p + data.m)), -one(T), work.ubuff1)
+    add_scaled_to!(work.rhs, data.n + data.p + 1, -one(T), work.ubuff1, data.m)
     return nothing
 end
 
@@ -280,9 +293,9 @@ function compute_centering!(solver::Solver{T}) where {T<:AbstractFloat}
     end
     data = solver.data
     work = solver.work
-    Dzaff = view(work.xyz, (data.n + data.p + 1):(data.n + data.p + data.m))
-    a = min(linesearch!(solver, work.z, Dzaff, one(T)), linesearch!(solver, work.s, work.Ds, one(T)))
-    axpy_to!(work.ubuff1, a, Dzaff, work.z)
+    Dz_offset = data.n + data.p + 1
+    a = min(linesearch_from!(solver, work.z, work.xyz, Dz_offset, one(T)), linesearch!(solver, work.s, work.Ds, one(T)))
+    axpy_to_from!(work.ubuff1, a, work.xyz, Dz_offset, work.z)
     axpy_to!(work.ubuff2, a, work.Ds, work.s)
     rho = safe_div(dot(work.ubuff1, work.ubuff2), dot(work.z, work.s))
     sigma = clamp(rho, zero(T), one(T))
@@ -293,11 +306,11 @@ end
 function predictor_corrector!(solver::Solver{T}) where {T<:AbstractFloat}
     data = solver.data
     work = solver.work
+    Dz_offset = data.n + data.p + 1
     construct_kkt_aff_rhs!(solver)
     solve_linsys!(solver, work.rhs, work.xyz)
 
-    Dzaff = view(work.xyz, (data.n + data.p + 1):(data.n + data.p + data.m))
-    nt_multiply!(work.ubuff1, work.Wfull, Dzaff, data, work)
+    nt_multiply_from!(work.ubuff1, work.Wfull, work.xyz, Dz_offset, data, work)
     @inbounds for i in eachindex(work.ubuff1)
         work.ubuff1[i] = -work.ubuff1[i] - work.lambda[i]
     end
@@ -312,21 +325,20 @@ function predictor_corrector!(solver::Solver{T}) where {T<:AbstractFloat}
         return nothing
     end
 
-    Dz = view(work.xyz, (data.n + data.p + 1):(data.n + data.p + data.m))
     cone_division!(work.ubuff1, work.lambda, work.Ds, data.l, data.q)
-    nt_multiply!(work.ubuff2, work.Wfull, Dz, data, work)
+    nt_multiply_from!(work.ubuff2, work.Wfull, work.xyz, Dz_offset, data, work)
     @inbounds for i in eachindex(work.ubuff3)
         work.ubuff3[i] = work.ubuff1[i] - work.ubuff2[i]
     end
     nt_multiply!(work.Ds, work.Wfull, work.ubuff3, data, work)
 
-    a = min(linesearch!(solver, work.s, work.Ds, T(0.99)), linesearch!(solver, work.z, Dz, T(0.99)))
+    a = min(linesearch!(solver, work.s, work.Ds, T(0.99)), linesearch_from!(solver, work.z, work.xyz, Dz_offset, T(0.99)))
     work.a = a
 
-    add_scaled!(work.x, a, view(work.xyz, 1:data.n))
+    add_scaled_from!(work.x, a, work.xyz, 1, data.n)
     add_scaled!(work.s, a, work.Ds)
-    add_scaled!(work.y, a, view(work.xyz, (data.n + 1):(data.n + data.p)))
-    add_scaled!(work.z, a, Dz)
+    add_scaled_from!(work.y, a, work.xyz, data.n + 1, data.p)
+    add_scaled_from!(work.z, a, work.xyz, Dz_offset, data.m)
     return nothing
 end
 
@@ -335,77 +347,48 @@ function check_stopping!(solver::Solver{T}) where {T<:AbstractFloat}
     work = solver.work
     scaling = solver.scaling
 
-    if data.p > 0
-        ew_product!(work.ybuff, scaling.Einvruiz, data.b)
-    end
-    binf = data.p > 0 ? inf_norm(work.ybuff) : zero(T)
+    binf = data.p > 0 ? weighted_inf_norm(data.b, scaling.Einvruiz) : zero(T)
 
-    if data.m > 0
-        ew_product!(work.ubuff1, scaling.Fruiz, work.s)
-    end
-    sinf = data.m > 0 ? inf_norm(work.ubuff1) : zero(T)
+    sinf = data.m > 0 ? weighted_inf_norm(work.s, scaling.Fruiz) : zero(T)
 
-    ew_product!(work.xbuff, scaling.Dinvruiz, work.x)
-    cinf = inf_norm(work.xbuff)
+    cinf = weighted_inf_norm(work.x, scaling.Dinvruiz)
 
-    if data.m > 0
-        ew_product!(work.ubuff3, scaling.Finvruiz, data.h)
-    end
-    hinf = data.m > 0 ? inf_norm(work.ubuff3) : zero(T)
+    hinf = data.m > 0 ? weighted_inf_norm(data.h, scaling.Finvruiz) : zero(T)
 
     if data.p > 0
         mul!(work.xbuff, data.At, work.y)
-        ew_product!(work.xbuff, work.xbuff, scaling.Dinvruiz)
-    else
-        fill!(work.xbuff, zero(T))
     end
-    Atyinf = data.p > 0 ? inf_norm(work.xbuff) : zero(T)
+    Atyinf = data.p > 0 ? weighted_inf_norm(work.xbuff, scaling.Dinvruiz) : zero(T)
 
     if data.m > 0
         mul!(work.xbuff, data.Gt, work.z)
-        ew_product!(work.xbuff, work.xbuff, scaling.Dinvruiz)
-    else
-        fill!(work.xbuff, zero(T))
     end
-    Gtzinf = data.m > 0 ? inf_norm(work.xbuff) : zero(T)
+    Gtzinf = data.m > 0 ? weighted_inf_norm(work.xbuff, scaling.Dinvruiz) : zero(T)
 
     mul_upper_symmetric!(work.xbuff, data.P, work.x)
     add_scaled!(work.xbuff, -solver.settings.kkt_static_reg, work.x)
-    ew_product!(work.xbuff, work.xbuff, scaling.Dinvruiz)
-    Pxinf = inf_norm(work.xbuff)
-    xPx = dot(work.x, work.xbuff)
+    Pxinf = weighted_inf_norm(work.xbuff, scaling.Dinvruiz)
+    xPx = weighted_dot(work.x, work.xbuff, scaling.Dinvruiz)
 
     if data.p > 0
         mul!(work.ybuff, data.A, work.x)
-        ew_product!(work.ybuff, work.ybuff, scaling.Einvruiz)
     end
-    Axinf = data.p > 0 ? inf_norm(work.ybuff) : zero(T)
+    Axinf = data.p > 0 ? weighted_inf_norm(work.ybuff, scaling.Einvruiz) : zero(T)
 
     if data.m > 0
         mul!(work.ubuff1, data.G, work.x)
-        ew_product!(work.ubuff1, work.ubuff1, scaling.Finvruiz)
     end
-    Gxinf = data.m > 0 ? inf_norm(work.ubuff1) : zero(T)
+    Gxinf = data.m > 0 ? weighted_inf_norm(work.ubuff1, scaling.Finvruiz) : zero(T)
 
-    if data.p > 0
-        ew_product!(work.ybuff, view(work.kktres, (data.n + 1):(data.n + data.p)), scaling.Einvruiz)
-    end
-    eq_res = data.p > 0 ? inf_norm(work.ybuff) : zero(T)
+    eq_res = data.p > 0 ? weighted_inf_norm_from(work.kktres, data.n + 1, scaling.Einvruiz, data.p) : zero(T)
 
-    if data.m > 0
-        ew_product!(work.ubuff1, view(work.kktres, (data.n + data.p + 1):(data.n + data.p + data.m)), scaling.Finvruiz)
-    end
-    conic_res = data.m > 0 ? inf_norm(work.ubuff1) : zero(T)
+    conic_res = data.m > 0 ? weighted_inf_norm_from(work.kktres, data.n + data.p + 1, scaling.Finvruiz, data.m) : zero(T)
     solver.solution.pres = max(eq_res, conic_res)
 
-    ew_product!(work.xbuff, view(work.kktres, 1:data.n), scaling.Dinvruiz)
-    scale!(work.xbuff, scaling.kinv)
-    solver.solution.dres = inf_norm(work.xbuff)
+    solver.solution.dres = weighted_inf_norm_from(work.kktres, 1, scaling.Dinvruiz, data.n) * scaling.kinv
 
     if data.m > 0
-        ew_product!(work.ubuff1, work.s, scaling.Fruiz)
-        ew_product!(work.ubuff2, work.z, scaling.Fruiz)
-        solver.solution.gap = dot(work.ubuff1, work.ubuff2) * scaling.kinv
+        solver.solution.gap = weighted_dot(work.s, work.z, scaling.Fruiz) * scaling.kinv
     else
         solver.solution.gap = zero(T)
     end

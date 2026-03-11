@@ -1,6 +1,7 @@
 module JuliaQOCO
 
 using LinearAlgebra
+using PrecompileTools: @compile_workload
 using Printf
 using SparseArrays
 
@@ -40,5 +41,15 @@ include("moi_wrapper.jl")
 default_settings(::Type{T} = Float64) where {T<:AbstractFloat} = Settings{T}()
 
 moi_version() = string(pkgversion(MOI))
+
+@compile_workload begin
+    settings = Settings{Float64}(; verbose = false)
+    P = spzeros(Float64, 1, 1)
+    G = sparse([-1.0;;])
+    solver = Solver(P, [1.0], nothing, nothing, G, [-1.0], 1, Int[]; settings = settings)
+    solve!(solver)
+    update_vector_data!(solver; c = [0.5])
+    solve!(solver)
+end
 
 end

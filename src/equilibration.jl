@@ -140,6 +140,7 @@ function ruiz_equilibration!(data::ProblemData{T,Ti}, scaling::Scaling{T}, ruiz_
     reciprocal!(scaling.Finvruiz, scaling.Fruiz)
     scaling.kinv = safe_div(one(T), scaling.k)
     data.stats = compute_scaling_statistics(data)
+    data.stats_dirty = false
     return nothing
 end
 

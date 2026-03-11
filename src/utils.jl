@@ -1,7 +1,26 @@
 const SAFE_DIV_EPS = 1e-15
 
+@inline elapsed_time_sec(t0::UInt64) = (time_ns() - t0) * 1e-9
+
 @inline function safe_div(a::T, b::T) where {T<:AbstractFloat}
     return abs(b) > T(SAFE_DIV_EPS) ? a / b : floatmax(T)
+end
+
+function reset_solve_profile!(profile::SolveProfile)
+    profile.initialize_time_sec = 0.0
+    profile.residual_time_sec = 0.0
+    profile.objective_time_sec = 0.0
+    profile.mu_time_sec = 0.0
+    profile.stopping_time_sec = 0.0
+    profile.nt_scaling_time_sec = 0.0
+    profile.nt_update_time_sec = 0.0
+    profile.predictor_time_sec = 0.0
+    profile.linsys_solve_time_sec = 0.0
+    profile.linsys_refine_time_sec = 0.0
+    profile.linsys_solves = 0
+    profile.linsys_refinements = 0
+    profile.nt_refactors = 0
+    return profile
 end
 
 function copy_negate!(dest::AbstractVector{T}, src::AbstractVector{T}) where {T}
@@ -53,12 +72,65 @@ function axpy_to!(dest::AbstractVector{T}, α::T, x::AbstractVector{T}, y::Abstr
     return dest
 end
 
+function axpy_to_from!(dest::AbstractVector{T}, α::T, x::AbstractVector{T}, xoffset::Int, y::AbstractVector{T}) where {T}
+    @inbounds @simd for i in eachindex(dest, y)
+        dest[i] = y[i] + α * x[xoffset + i - 1]
+    end
+    return dest
+end
+
+function add_scaled_from!(y::AbstractVector{T}, α::T, x::AbstractVector{T}, xoffset::Int, n::Int) where {T}
+    @inbounds @simd for i in 1:n
+        y[i] += α * x[xoffset + i - 1]
+    end
+    return y
+end
+
+function add_scaled_to!(y::AbstractVector{T}, yoffset::Int, α::T, x::AbstractVector{T}, n::Int) where {T}
+    @inbounds @simd for i in 1:n
+        y[yoffset + i - 1] += α * x[i]
+    end
+    return y
+end
+
+function copy_negate_to!(dest::AbstractVector{T}, dest_offset::Int, src::AbstractVector{T}, n::Int) where {T}
+    @inbounds @simd for i in 1:n
+        dest[dest_offset + i - 1] = -src[i]
+    end
+    return dest
+end
+
 function inf_norm(x::AbstractVector{T}) where {T<:AbstractFloat}
     nrm = zero(T)
     @inbounds for xi in x
         nrm = max(nrm, abs(xi))
     end
     return nrm
+end
+
+function weighted_inf_norm(x::AbstractVector{T}, w::AbstractVector{T}) where {T<:AbstractFloat}
+    nrm = zero(T)
+    @inbounds @simd for i in eachindex(x, w)
+        nrm = max(nrm, abs(x[i] * w[i]))
+    end
+    return nrm
+end
+
+function weighted_inf_norm_from(x::AbstractVector{T}, xoffset::Int, w::AbstractVector{T}, n::Int) where {T<:AbstractFloat}
+    nrm = zero(T)
+    @inbounds @simd for i in 1:n
+        nrm = max(nrm, abs(x[xoffset + i - 1] * w[i]))
+    end
+    return nrm
+end
+
+function weighted_dot(x::AbstractVector{T}, y::AbstractVector{T}, w::AbstractVector{T}) where {T<:AbstractFloat}
+    acc = zero(T)
+    @inbounds @simd for i in eachindex(x, y, w)
+        wi = w[i]
+        acc += (x[i] * wi) * (y[i] * wi)
+    end
+    return acc
 end
 
 function min_abs_nonzero(x::AbstractVector{T}) where {T<:AbstractFloat}

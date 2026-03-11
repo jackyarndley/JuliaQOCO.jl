@@ -25,7 +25,8 @@ struct QDLDLWorkspace{Tf<:AbstractFloat,Ti<:Integer,TA<:Union{Vector{Ti},Nothing
     elim_buffer::Vector{Ti}
     lnext::Vector{Ti}
     bwork::Vector{Bool}
-    fwork::Vector{Tf}
+    factor_fwork::Vector{Tf}
+    solve_fwork::Vector{Tf}
 
     #L matrix row indices and data
     Ln::Int         #always Int since SparseMatrixCSC does it this way
@@ -36,6 +37,12 @@ struct QDLDLWorkspace{Tf<:AbstractFloat,Ti<:Integer,TA<:Union{Vector{Ti},Nothing
     #D and its inverse
     D::Vector{Tf}
     Dinv::Vector{Tf}
+
+    #cached row-wise symbolic pattern for fast numeric refactorization
+    rowptr::Vector{Ti}
+    rowcols::Vector{Ti}
+    rowvals::Vector{Ti}
+    pattern_initialized::Ref{Bool}
 
     #number of positive values in D
     positive_inertia::Ref{Ti}
@@ -76,7 +83,8 @@ function QDLDLWorkspace(triuA::SparseMatrixCSC{Tf,Ti},
     elim_buffer = Vector{Ti}(undef,triuA.n)
     lnext  = Vector{Ti}(undef,triuA.n)
     bwork  = Vector{Bool}(undef,triuA.n)
-    fwork  = Vector{Tf}(undef,triuA.n)
+    factor_fwork = zeros(Tf, triuA.n)
+    solve_fwork = Vector{Tf}(undef, triuA.n)
 
     #compute elimination tree using QDLDL converted code
     sumLnz = QDLDL_etree!(triuA.n,triuA.colptr,triuA.rowval,yidx,Lnz,etree)
@@ -95,6 +103,12 @@ function QDLDLWorkspace(triuA::SparseMatrixCSC{Tf,Ti},
     D  = Vector{Tf}(undef,triuA.n)
     Dinv = Vector{Tf}(undef,triuA.n)
 
+    #allocate cached row-wise symbolic pattern storage
+    rowptr = Vector{Ti}(undef, triuA.n + 1)
+    rowcols = Vector{Ti}(undef, sumLnz)
+    rowvals = Vector{Ti}(undef, sumLnz)
+    pattern_initialized = Ref{Bool}(false)
+
     #allocate for positive inertia count.  -1 to
     #start since we haven't counted anything yet
     positive_inertia = Ref{Ti}(-1)
@@ -102,8 +116,8 @@ function QDLDLWorkspace(triuA::SparseMatrixCSC{Tf,Ti},
     #number of regularized entries in D. None to start
     regularize_count = zeros(Ti,1)
 
-    QDLDLWorkspace(etree,Lnz,yidx,elim_buffer,lnext,bwork,fwork,
-                   Ln,Lp,Li,Lx,D,Dinv,positive_inertia,triuA,
+    QDLDLWorkspace(etree,Lnz,yidx,elim_buffer,lnext,bwork,factor_fwork,solve_fwork,
+                   Ln,Lp,Li,Lx,D,Dinv,rowptr,rowcols,rowvals,pattern_initialized,positive_inertia,triuA,
                    AtoPAPt, Dsigns,regularize_eps,
                    regularize_delta,regularize_count)
 
@@ -324,31 +338,55 @@ function factor!(workspace::QDLDLWorkspace{Tf,Ti},logical::Bool) where {Tf<:Abst
         workspace.Dinv .= 1
     end
 
-    #factor using QDLDL converted code
     A = workspace.triuA
-    posDCount  = QDLDL_factor!(A.n,A.colptr,A.rowval,A.nzval,
-                               workspace.Lp,
-                               workspace.Li,
-                               workspace.Lx,
-                               workspace.D,
-                               workspace.Dinv,
-                               workspace.Lnz,
-                               workspace.etree,
-                               workspace.bwork,
-                               workspace.yidx,
-                               workspace.elim_buffer,
-                               workspace.lnext,
-                               workspace.fwork,
-                               logical,
-                               workspace.Dsigns,
-                               workspace.regularize_eps,
-                              workspace.regularize_delta,
-                              workspace.regularize_count
-                              )
+    posDCount = if logical || !workspace.pattern_initialized[]
+        QDLDL_factor!(A.n,A.colptr,A.rowval,A.nzval,
+                      workspace.Lp,
+                      workspace.Li,
+                      workspace.Lx,
+                      workspace.D,
+                      workspace.Dinv,
+                      workspace.Lnz,
+                      workspace.etree,
+                      workspace.bwork,
+                      workspace.yidx,
+                      workspace.elim_buffer,
+                      workspace.lnext,
+                      workspace.factor_fwork,
+                      logical,
+                      workspace.Dsigns,
+                      workspace.regularize_eps,
+                      workspace.regularize_delta,
+                      workspace.regularize_count,
+                      workspace.rowptr,
+                      workspace.rowcols,
+                      workspace.rowvals,
+                      !workspace.pattern_initialized[])
+    else
+        QDLDL_numeric_factor!(A.n,
+                             A.colptr,
+                             A.rowval,
+                             A.nzval,
+                             workspace.Lp,
+                             workspace.Li,
+                             workspace.Lx,
+                             workspace.D,
+                             workspace.Dinv,
+                             workspace.rowptr,
+                             workspace.rowcols,
+                             workspace.rowvals,
+                             workspace.factor_fwork,
+                             workspace.Dsigns,
+                             workspace.regularize_eps,
+                             workspace.regularize_delta,
+                             workspace.regularize_count)
+    end
 
     if(posDCount < 0)
         error("Zero entry in D (matrix is not quasidefinite)")
     end
+
+    workspace.pattern_initialized[] = true
 
     workspace.positive_inertia[] = posDCount
 
@@ -375,9 +413,10 @@ function solve!(F::QDLDLFactorisation,b)
     end
 
     perm = F.perm
+    iperm = F.iperm
 
     #permute b
-    tmp = perm === nothing ? b : permute!(F.workspace.fwork,b,perm)
+    tmp = perm === nothing ? b : permute!(F.workspace.solve_fwork,b,perm)
 
     QDLDL_solve!(F.workspace.Ln,
                  F.workspace.Lp,
@@ -388,7 +427,7 @@ function solve!(F::QDLDLFactorisation,b)
 
     #inverse permutation
     if perm !== nothing
-        ipermute!(b,F.workspace.fwork,perm)
+        inverse_permute!(b, F.workspace.solve_fwork, iperm)
     end
 
     return nothing
@@ -469,7 +508,11 @@ function QDLDL_factor!(
         Dsigns,
         regularize_eps,
         regularize_delta,
-        regularize_count
+        regularize_count,
+        rowptr,
+        rowcols,
+        rowvals,
+        record_pattern::Bool,
 )
 
     positiveValuesInD  = 0
@@ -478,8 +521,13 @@ function QDLDL_factor!(
     yMarkers        = bwork
     yVals           = fwork
     zeroT = zero(eltype(D))
+    rowwrite = one(eltype(Lp))
 
     Lp[1] = 1 #first column starts at index one / Julia is 1 indexed
+    if record_pattern
+        rowptr[1] = one(eltype(rowptr))
+        rowptr[2] = one(eltype(rowptr))
+    end
 
     i = 1
     @inbounds while i <= n
@@ -602,7 +650,8 @@ function QDLDL_factor!(
                 j = Lp[cidx]
                 jstop = tmpIdx - 1
                 while j <= jstop
-                    yVals[Li[j]] -= Lx[j]*yVals_cidx
+                    rowj = Li[j]
+                    yVals[rowj] = muladd(-Lx[j], yVals_cidx, yVals[rowj])
                     j += 1
                 end
 
@@ -612,11 +661,16 @@ function QDLDL_factor!(
                 Lx[tmpIdx] = yVals_cidx *Dinv[cidx]
 
                 #D[k] -= yVals[cidx]*yVals[cidx]*Dinv[cidx];
-                D[k] -= yVals_cidx*Lx[tmpIdx]
+                D[k] = muladd(-yVals_cidx, Lx[tmpIdx], D[k])
             end
 
             #also record which row it went into
             Li[tmpIdx] = k
+            if record_pattern
+                rowcols[rowwrite] = cidx
+                rowvals[rowwrite] = tmpIdx
+                rowwrite += 1
+            end
 
             LNextSpaceInCol[cidx] += 1
 
@@ -630,6 +684,9 @@ function QDLDL_factor!(
 
         #apply dynamic regularization if a sign
         #vector has been specified.
+        if record_pattern
+            rowptr[k + 1] = rowwrite
+        end
         if(Dsigns !== nothing && Dsigns[k]*D[k] < regularize_eps)
             D[k] = regularize_delta * Dsigns[k]
             regularize_count[1] += 1
@@ -651,15 +708,112 @@ function QDLDL_factor!(
 
 end
 
+function QDLDL_numeric_factor!(
+        n,
+        Ap,
+        Ai,
+        Ax,
+        Lp,
+        Li,
+        Lx,
+        D,
+        Dinv,
+        rowptr,
+        rowcols,
+        rowvals,
+        fwork,
+        Dsigns,
+        regularize_eps,
+        regularize_delta,
+        regularize_count,
+)
+
+    positiveValuesInD = 0
+    regularize_count[1] = 0
+    yVals = fwork
+    zeroT = zero(eltype(D))
+    fill!(yVals, zeroT)
+
+    D1 = Ax[1]
+    if(Dsigns !== nothing && Dsigns[1] * D1 < regularize_eps)
+        D1 = regularize_delta * Dsigns[1]
+        regularize_count[1] += 1
+    end
+    if(D1 == zeroT)
+        return -1
+    end
+    D[1] = D1
+    if(D1 > zeroT)
+        positiveValuesInD += 1
+    end
+    Dinv[1] = inv(D1)
+
+    k = 2
+    @inbounds while k <= n
+        Dk = zeroT
+        i = Ap[k]
+        istop = Ap[k + 1] - 1
+        while i <= istop
+            bidx = Ai[i]
+            axi = Ax[i]
+            if bidx == k
+                Dk = axi
+            else
+                yVals[bidx] = axi
+            end
+            i += 1
+        end
+
+        rowidx = rowptr[k]
+        rowstop = rowptr[k + 1] - 1
+        while rowidx <= rowstop
+            cidx = rowcols[rowidx]
+            tmpIdx = rowvals[rowidx]
+            yVals_cidx = yVals[cidx]
+            j = Lp[cidx]
+            jstop = tmpIdx - 1
+            while j <= jstop
+                rowj = Li[j]
+                yVals[rowj] = muladd(-Lx[j], yVals_cidx, yVals[rowj])
+                j += 1
+            end
+
+            lx = yVals_cidx * Dinv[cidx]
+            Lx[tmpIdx] = lx
+            Dk = muladd(-yVals_cidx, lx, Dk)
+            yVals[cidx] = zeroT
+            rowidx += 1
+        end
+
+        if(Dsigns !== nothing && Dsigns[k] * Dk < regularize_eps)
+            Dk = regularize_delta * Dsigns[k]
+            regularize_count[1] += 1
+        end
+        if(Dk == zeroT)
+            return -1
+        end
+        D[k] = Dk
+        if(Dk > zeroT)
+            positiveValuesInD += 1
+        end
+        Dinv[k] = inv(Dk)
+        k += 1
+    end
+
+    return positiveValuesInD
+end
+
 # Solves (L+I)x = b, with x replacing b
 function QDLDL_Lsolve!(n,Lp,Li,Lx,x)
 
     i = 1
     @inbounds while i <= n
+        xi = x[i]
         j = Lp[i]
         jstop = Lp[i + 1] - 1
         while j <= jstop
-            x[Li[j]] -= Lx[j]*x[i];
+            rowj = Li[j]
+            x[rowj] = muladd(-Lx[j], xi, x[rowj])
             j += 1
         end
         i += 1
@@ -675,10 +829,12 @@ function QDLDL_Ltsolve!(n,Lp,Li,Lx,x)
     @inbounds while i >= 1
         j = Lp[i]
         jstop = Lp[i + 1] - 1
+        xi = x[i]
         while j <= jstop
-            x[i] -= Lx[j]*x[Li[j]]
+            xi = muladd(-Lx[j], x[Li[j]], xi)
             j += 1
         end
+        x[i] = xi
         i -= 1
     end
     return nothing
@@ -702,17 +858,24 @@ end
 # internal permutation and inverse permutation
 # functions that require no memory allocations
 function permute!(x,b,p)
-  @inbounds for j = eachindex(x)
-      x[j] = b[p[j]];
-  end
-  return x
+    @inbounds @simd for j in eachindex(x, p)
+        x[j] = b[p[j]]
+    end
+    return x
 end
 
 function ipermute!(x,b,p)
- @inbounds for j = eachindex(x)
-     x[p[j]] = b[j];
- end
- return x
+    @inbounds for j in eachindex(x, p)
+        x[p[j]] = b[j]
+    end
+    return x
+end
+
+function inverse_permute!(x, b, iperm)
+    @inbounds @simd for j in eachindex(x, iperm)
+        x[j] = b[iperm[j]]
+    end
+    return x
 end
 
 
