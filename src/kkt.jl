@@ -232,16 +232,42 @@ end
 function compute_kkt_residual!(solver::Solver{T}) where {T<:AbstractFloat}
     data = solver.data
     work = solver.work
-    copyto!(work.xyzbuff1, 1, work.x, 1, data.n)
-    copyto!(work.xyzbuff1, data.n + 1, work.y, 1, data.p)
-    copyto!(work.xyzbuff1, data.n + data.p + 1, work.z, 1, data.m)
-    kkt_multiply!(work.kktres, work.xyzbuff1, data, work; include_nt = false)
+    scaling = solver.scaling
 
+    mul_upper_symmetric!(work.xbuff, data.P, work.x)
+    add_scaled!(work.xbuff, -solver.settings.kkt_static_reg, work.x)
+    work.quad_obj = dot(work.xbuff, work.x)
+    work.xPx = weighted_dot(work.x, work.xbuff, scaling.Dinvruiz)
+    work.Pxinf = weighted_inf_norm(work.xbuff, scaling.Dinvruiz)
+    copyto!(work.kktres, 1, work.xbuff, 1, data.n)
     add_scaled_to!(work.kktres, 1, one(T), data.c, data.n)
-    add_scaled_to!(work.kktres, 1, -solver.settings.kkt_static_reg, work.x, data.n)
-    add_scaled_to!(work.kktres, data.n + 1, -one(T), data.b, data.p)
-    add_scaled_to!(work.kktres, data.n + data.p + 1, -one(T), data.h, data.m)
-    add_scaled_to!(work.kktres, data.n + data.p + 1, one(T), work.s, data.m)
+
+    if data.p > 0
+        mul!(work.xbuff, data.At, work.y)
+        work.Atyinf = weighted_inf_norm(work.xbuff, scaling.Dinvruiz)
+        add_scaled_to!(work.kktres, 1, one(T), work.xbuff, data.n)
+        mul!(work.ybuff, data.A, work.x)
+        work.Axinf = weighted_inf_norm(work.ybuff, scaling.Einvruiz)
+        copyto!(work.kktres, data.n + 1, work.ybuff, 1, data.p)
+        add_scaled_to!(work.kktres, data.n + 1, -one(T), data.b, data.p)
+    else
+        work.Atyinf = zero(T)
+        work.Axinf = zero(T)
+    end
+
+    if data.m > 0
+        mul!(work.xbuff, data.Gt, work.z)
+        work.Gtzinf = weighted_inf_norm(work.xbuff, scaling.Dinvruiz)
+        add_scaled_to!(work.kktres, 1, one(T), work.xbuff, data.n)
+        mul!(work.ubuff1, data.G, work.x)
+        work.Gxinf = weighted_inf_norm(work.ubuff1, scaling.Finvruiz)
+        copyto!(work.kktres, data.n + data.p + 1, work.ubuff1, 1, data.m)
+        add_scaled_to!(work.kktres, data.n + data.p + 1, -one(T), data.h, data.m)
+        add_scaled_to!(work.kktres, data.n + data.p + 1, one(T), work.s, data.m)
+    else
+        work.Gtzinf = zero(T)
+        work.Gxinf = zero(T)
+    end
     return nothing
 end
 
@@ -253,9 +279,7 @@ end
 function compute_objective!(solver::Solver{T}) where {T<:AbstractFloat}
     data = solver.data
     work = solver.work
-    mul_upper_symmetric!(work.xbuff, data.P, work.x)
-    correction = solver.settings.kkt_static_reg * dot(work.x, work.x)
-    obj = dot(work.x, data.c) + T(0.5) * (dot(work.xbuff, work.x) - correction)
+    obj = dot(work.x, data.c) + T(0.5) * work.quad_obj
     solver.solution.obj = safe_div(obj, solver.scaling.k)
     return solver.solution.obj
 end
@@ -355,31 +379,6 @@ function check_stopping!(solver::Solver{T}) where {T<:AbstractFloat}
 
     hinf = data.m > 0 ? weighted_inf_norm(data.h, scaling.Finvruiz) : zero(T)
 
-    if data.p > 0
-        mul!(work.xbuff, data.At, work.y)
-    end
-    Atyinf = data.p > 0 ? weighted_inf_norm(work.xbuff, scaling.Dinvruiz) : zero(T)
-
-    if data.m > 0
-        mul!(work.xbuff, data.Gt, work.z)
-    end
-    Gtzinf = data.m > 0 ? weighted_inf_norm(work.xbuff, scaling.Dinvruiz) : zero(T)
-
-    mul_upper_symmetric!(work.xbuff, data.P, work.x)
-    add_scaled!(work.xbuff, -solver.settings.kkt_static_reg, work.x)
-    Pxinf = weighted_inf_norm(work.xbuff, scaling.Dinvruiz)
-    xPx = weighted_dot(work.x, work.xbuff, scaling.Dinvruiz)
-
-    if data.p > 0
-        mul!(work.ybuff, data.A, work.x)
-    end
-    Axinf = data.p > 0 ? weighted_inf_norm(work.ybuff, scaling.Einvruiz) : zero(T)
-
-    if data.m > 0
-        mul!(work.ubuff1, data.G, work.x)
-    end
-    Gxinf = data.m > 0 ? weighted_inf_norm(work.ubuff1, scaling.Finvruiz) : zero(T)
-
     eq_res = data.p > 0 ? weighted_inf_norm_from(work.kktres, data.n + 1, scaling.Einvruiz, data.p) : zero(T)
 
     conic_res = data.m > 0 ? weighted_inf_norm_from(work.kktres, data.n + data.p + 1, scaling.Finvruiz, data.m) : zero(T)
@@ -393,13 +392,13 @@ function check_stopping!(solver::Solver{T}) where {T<:AbstractFloat}
         solver.solution.gap = zero(T)
     end
 
-    pres_rel = max(max(Axinf, binf), max(max(Gxinf, hinf), sinf))
-    dres_rel = max(max(Pxinf, Atyinf), max(Gtzinf, cinf)) * scaling.kinv
+    pres_rel = max(max(work.Axinf, binf), max(max(work.Gxinf, hinf), sinf))
+    dres_rel = max(max(work.Pxinf, work.Atyinf), max(work.Gtzinf, cinf)) * scaling.kinv
     ctx = dot(data.c, work.x)
     bty = dot(data.b, work.y)
     htz = dot(data.h, work.z)
-    pobj = abs(T(0.5) * xPx + ctx)
-    dobj = abs(-T(0.5) * xPx - bty - htz)
+    pobj = abs(T(0.5) * work.xPx + ctx)
+    dobj = abs(-T(0.5) * work.xPx - bty - htz)
     gap_rel = max(one(T), max(pobj, dobj))
 
     if work.a < T(1e-8)

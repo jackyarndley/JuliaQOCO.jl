@@ -111,9 +111,6 @@ function nt_multiply!(z::AbstractVector{T}, Wfull::AbstractVector{T}, x::Abstrac
     @inbounds for i in 1:data.l
         z[i] = Wfull[i] * x[i]
     end
-    @inbounds for i in (data.l + 1):length(z)
-        z[i] = zero(T)
-    end
     for (block, q) in enumerate(data.q)
         idx = work.soc_offsets[block]
         offset = work.Wfull_offsets[block]
@@ -132,9 +129,6 @@ end
 function nt_multiply_from!(z::AbstractVector{T}, Wfull::AbstractVector{T}, x::AbstractVector{T}, xoffset::Int, data::ProblemData{T}, work::Workspace{T,Ti}) where {T<:AbstractFloat,Ti<:Integer}
     @inbounds for i in 1:data.l
         z[i] = Wfull[i] * x[xoffset + i - 1]
-    end
-    @inbounds for i in (data.l + 1):length(z)
-        z[i] = zero(T)
     end
     for (block, q) in enumerate(data.q)
         idx = work.soc_offsets[block]

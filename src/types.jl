@@ -96,6 +96,13 @@ mutable struct Workspace{T<:AbstractFloat,Ti<:Integer}
     soc_offsets::Vector{Ti}
     Wfull_offsets::Vector{Ti}
     Wtri_offsets::Vector{Ti}
+    quad_obj::T
+    xPx::T
+    Pxinf::T
+    Atyinf::T
+    Gtzinf::T
+    Axinf::T
+    Gxinf::T
 end
 
 mutable struct Solution{T<:AbstractFloat}

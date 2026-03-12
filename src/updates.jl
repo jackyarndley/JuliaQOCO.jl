@@ -178,6 +178,29 @@ function update_matrix_data!(
 
     solver.solution.status = QOCO_UNSOLVED
     solver.solution.status_detail = ""
+    if solver.settings.ruiz_iters == 0
+        if Px !== nothing
+            unregularize_P!(data.P, solver.settings.kkt_static_reg)
+            copy_original_P_values!(data.P, Px, data.Padded_idx)
+            regularize_existing_P!(data.P, solver.settings.kkt_static_reg)
+        end
+        if Ax !== nothing
+            copyto!(data.A.nzval, Ax)
+            @inbounds for i in eachindex(data.At.nzval, data.AtoAt)
+                data.At.nzval[i] = Ax[data.AtoAt[i]]
+            end
+        end
+        if Gx !== nothing
+            copyto!(data.G.nzval, Gx)
+            @inbounds for i in eachindex(data.Gt.nzval, data.GtoGt)
+                data.Gt.nzval[i] = Gx[data.GtoGt[i]]
+            end
+        end
+        data.stats_dirty = true
+        _refresh_static_kkt!(solver)
+        return solver
+    end
+
     _unscale_problem_data!(solver)
 
     if Px !== nothing

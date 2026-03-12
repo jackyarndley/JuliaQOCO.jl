@@ -50,6 +50,13 @@ function _workspace(data::ProblemData{T,Ti}) where {T<:AbstractFloat,Ti<:Integer
         soc_offsets,
         Wfull_offsets,
         Wtri_offsets,
+        zero(T),
+        zero(T),
+        zero(T),
+        zero(T),
+        zero(T),
+        zero(T),
+        zero(T),
     )
 end
 

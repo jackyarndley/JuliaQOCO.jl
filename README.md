@@ -64,3 +64,9 @@ For repeated-solve benchmarking without the MOI wrapper, run:
 ```julia
 julia --project=. benchmark/native_repeated_solves.jl
 ```
+
+For a more SCP-like repeated benchmark with stage-coupled dynamics updates, SOC constraints, and `BenchmarkTools` measurements, run:
+
+```julia
+julia --project=benchmark benchmark/scp_like_benchmark.jl
+```

@@ -113,8 +113,17 @@ end
     u = [2.0, 0.5]
     Du = [-1.1, 0.7]
     step = JuliaQOCO.linesearch!(solver, u, Du, 0.99)
+    bisect_step = JuliaQOCO.bisection_search!(solver, u, Du, 0.99)
     trial = u .+ step .* Du
     @test JuliaQOCO.cone_residual(trial, 0, [2]) < 0.0
+    @test step >= bisect_step
+
+    rhs = [0.0, 0.0, -1.1, 0.7]
+    step_from = JuliaQOCO.linesearch_from!(solver, u, rhs, 3, 0.99)
+    bisect_from = JuliaQOCO.bisection_search_from!(solver, u, rhs, 3, 0.99)
+    trial_from = u .+ step_from .* rhs[3:4]
+    @test JuliaQOCO.cone_residual(trial_from, 0, [2]) < 0.0
+    @test step_from >= bisect_from
 end
 
 @testset "NT scaling consistency" begin
