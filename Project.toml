@@ -1,6 +1,5 @@
 name = "JuliaQOCO"
 uuid = "517bb1e9-2c10-47b1-b4ea-30f7675d06de"
-authors = ["Jack", "Copilot"]
 version = "0.1.0"
 
 [deps]
