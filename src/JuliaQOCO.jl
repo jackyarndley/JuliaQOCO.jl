@@ -29,6 +29,7 @@ export Settings,
        update_h_entries!,
        copy_settings,
        default_settings,
+       active_kkt_backend,
        solve!,
        solve
 

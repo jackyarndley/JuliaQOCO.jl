@@ -162,6 +162,24 @@ function _linsys(data::ProblemData{T,Ti}, settings::Settings{T}, work::Workspace
         regularize_eps = settings.kkt_dynamic_reg,
         regularize_delta = settings.kkt_dynamic_reg,
     )
+    use_generated =
+        settings.kkt_backend == :generated ||
+        (
+            settings.kkt_backend == :auto &&
+            factor.workspace.Ln <= settings.generated_max_dimension &&
+            nnz(factor.L) <= settings.generated_max_factor_nnz
+        )
+    if use_generated
+        factor = QDLDL.generate_factorization(
+            factor,
+            data.P,
+            data.A,
+            data.G,
+        )
+        # Charge pattern generation and JIT compilation to setup, as QOCOGEN
+        # reports generation/compilation separately from repeated solves.
+        QDLDL.refactor!(factor)
+    end
     static2kkt = Vector{Ti}(undef, length(P2kkt) + length(At2kkt) + length(Gt2kkt))
     pos = 1
     copyto!(view(static2kkt, pos:(pos + length(P2kkt) - 1)), P2kkt)
@@ -238,7 +256,9 @@ function _print_header(solver::Solver{T}) where {T<:AbstractFloat}
     @printf(io, "|     Constraint range     [%.0e, %.0e]               |\n", stats.constraint_range_min, stats.constraint_range_max)
     @printf(io, "|     RHS range            [%.0e, %.0e]               |\n", stats.rhs_range_min, stats.rhs_range_max)
     @printf(io, "| Solver Settings:                                      |\n")
-    @printf(io, "|     algebra: %-27s              |\n", "JuliaQOCO.QDLDL")
+    algebra = active_kkt_backend(solver) == :generated ?
+              "JuliaQOCO.GeneratedQDLDL" : "JuliaQOCO.QDLDL"
+    @printf(io, "|     algebra: %-27s              |\n", algebra)
     @printf(io, "|     max_iters: %-3d abstol: %3.2e reltol: %3.2e  |\n", settings.max_iters, settings.abstol, settings.reltol)
     @printf(io, "|     abstol_inacc: %3.2e reltol_inacc: %3.2e     |\n", settings.abstol_inacc, settings.reltol_inacc)
     @printf(io, "|     bisect_iters: %-2d iter_ref_iters: %-2d               |\n", settings.bisect_iters, settings.iter_ref_iters)
@@ -331,6 +351,12 @@ function _solve_fast_loop!(solver::Solver{T}, t0::UInt64) where {T<:AbstractFloa
         _print_footer(solver)
     end
     return solver
+end
+
+function active_kkt_backend(solver::Solver)
+    factor = solver.linsys.factor
+    factor === nothing && return :none
+    return QDLDL.is_generated(factor) ? :generated : :qdldl
 end
 
 function _solve_profiled_loop!(solver::Solver{T}, t0::UInt64) where {T<:AbstractFloat}

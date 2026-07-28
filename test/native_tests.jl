@@ -306,4 +306,167 @@ end
     @test isapprox(solver.solution.x, [0.8, 0.1]; atol = 1e-5, rtol = 1e-5)
 end
 
+@testset "Generated fixed-pattern KKT backend" begin
+    P = sparse([1, 2], [1, 2], [2.0, 4.0], 2, 2)
+    c = [-2.0, -1.0]
+    A = sparse([1, 1], [1, 2], [1.0, 1.0], 1, 2)
+    b = [1.0]
+    G = sparse([1, 2], [1, 2], [-1.0, -1.0], 2, 2)
+    h = [0.0, 0.0]
+    standard = JuliaQOCO.Solver(
+        P,
+        c,
+        A,
+        b,
+        G,
+        h,
+        2,
+        Int[];
+        settings = JuliaQOCO.Settings{Float64}(;
+            verbose = false,
+            kkt_backend = :qdldl,
+            scaling_mode = :once,
+        ),
+    )
+    generated = JuliaQOCO.Solver(
+        P,
+        c,
+        A,
+        b,
+        G,
+        h,
+        2,
+        Int[];
+        settings = JuliaQOCO.Settings{Float64}(;
+            verbose = false,
+            kkt_backend = :generated,
+            scaling_mode = :once,
+        ),
+    )
+    @test JuliaQOCO.active_kkt_backend(standard) == :qdldl
+    @test JuliaQOCO.active_kkt_backend(generated) == :generated
+    @test standard.linsys.factor.workspace.Lx ==
+          generated.linsys.factor.workspace.Lx
+    @test standard.linsys.factor.workspace.Dinv ==
+          generated.linsys.factor.workspace.Dinv
+
+    JuliaQOCO.solve!(standard)
+    JuliaQOCO.solve!(generated)
+    @test standard.solution.status == generated.solution.status ==
+          JuliaQOCO.QOCO_SOLVED
+    @test standard.solution.x == generated.solution.x
+    @test standard.solution.obj == generated.solution.obj
+    kkt_rhs = [0.2, -0.1, 0.3, -0.4, 0.5]
+    standard_product = similar(kkt_rhs)
+    generated_product = similar(kkt_rhs)
+    JuliaQOCO.kkt_multiply!(
+        standard_product,
+        kkt_rhs,
+        standard.data,
+        standard.work,
+        standard.linsys.factor.generated_pattern,
+    )
+    JuliaQOCO.kkt_multiply!(
+        generated_product,
+        kkt_rhs,
+        generated.data,
+        generated.work,
+        generated.linsys.factor.generated_pattern,
+    )
+    @test standard_product == generated_product
+
+    JuliaQOCO.update_vector_data!(
+        standard;
+        c = [-2.2, -0.8],
+        b = [1.1],
+    )
+    JuliaQOCO.update_vector_data!(
+        generated;
+        c = [-2.2, -0.8],
+        b = [1.1],
+    )
+    JuliaQOCO.update_matrix_data!(
+        standard;
+        Px = [2.2, 3.8],
+        Ax = [1.0, 1.5],
+        Gx = [-0.9, -1.1],
+    )
+    JuliaQOCO.update_matrix_data!(
+        generated;
+        Px = [2.2, 3.8],
+        Ax = [1.0, 1.5],
+        Gx = [-0.9, -1.1],
+    )
+    JuliaQOCO.solve!(standard)
+    JuliaQOCO.solve!(generated)
+    @test standard.solution.status == generated.solution.status ==
+          JuliaQOCO.QOCO_SOLVED
+    @test standard.solution.x == generated.solution.x
+    @test standard.solution.obj == generated.solution.obj
+    @test @allocated(JuliaQOCO.QDLDL.refactor!(generated.linsys.factor)) == 0
+    @test all(iszero, generated.linsys.factor.workspace.factor_fwork)
+
+    standard_soc = JuliaQOCO.solve(
+        spzeros(1, 1),
+        [1.0];
+        G = sparse([-1.0; 0.0;;]),
+        h = [0.0, 1.0],
+        q = [2],
+        settings = JuliaQOCO.Settings{Float64}(;
+            verbose = false,
+            kkt_backend = :qdldl,
+        ),
+    )
+    generated_soc = JuliaQOCO.solve(
+        spzeros(1, 1),
+        [1.0];
+        G = sparse([-1.0; 0.0;;]),
+        h = [0.0, 1.0],
+        q = [2],
+        settings = JuliaQOCO.Settings{Float64}(;
+            verbose = false,
+            kkt_backend = :generated,
+        ),
+    )
+    @test standard_soc.solution.status == generated_soc.solution.status ==
+          JuliaQOCO.QOCO_SOLVED
+    @test standard_soc.solution.x == generated_soc.solution.x
+    @test standard_soc.solution.obj == generated_soc.solution.obj
+
+    auto = JuliaQOCO.Solver(
+        P,
+        c,
+        A,
+        b,
+        G,
+        h,
+        2,
+        Int[];
+        settings = JuliaQOCO.Settings{Float64}(;
+            verbose = false,
+            kkt_backend = :auto,
+            generated_max_dimension = 1,
+        ),
+    )
+    @test JuliaQOCO.active_kkt_backend(auto) == :qdldl
+    auto_generated = JuliaQOCO.Solver(
+        P,
+        c,
+        A,
+        b,
+        G,
+        h,
+        2,
+        Int[];
+        settings = JuliaQOCO.Settings{Float64}(;
+            verbose = false,
+            kkt_backend = :auto,
+        ),
+    )
+    @test JuliaQOCO.active_kkt_backend(auto_generated) == :generated
+    @test_throws ArgumentError JuliaQOCO.validate_settings(
+        JuliaQOCO.Settings{Float64}(; kkt_backend = :unknown),
+    )
+end
+
 end

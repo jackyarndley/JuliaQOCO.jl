@@ -404,6 +404,58 @@ end
     @test JuMP.objective_value(model) ≈ -0.5 atol = 1e-4
 end
 
+@testset "JuMP generated KKT backend" begin
+    model = JuMP.direct_model(
+        JuliaQOCO.Optimizer(;
+            verbose = false,
+            kkt_backend = :generated,
+            reuse_solver = true,
+            scaling_mode = :once,
+        ),
+    )
+    @variable(model, x >= 0)
+    equality = @constraint(model, x == 1.0)
+    @objective(model, Min, 1.1x)
+    optimize!(model)
+    optimizer = backend(model)
+    solver = MOI.get(optimizer, MOI.RawSolver())
+    @test termination_status(model) == MOI.OPTIMAL
+    @test JuliaQOCO.active_kkt_backend(solver) == :generated
+    @test MOI.get(
+        optimizer,
+        MOI.RawOptimizerAttribute("active_kkt_backend"),
+    ) == :generated
+    rebuild_count = MOI.get(
+        optimizer,
+        MOI.RawOptimizerAttribute("rebuild_count"),
+    )
+    set_normalized_coefficient(equality, x, 1.5)
+    set_normalized_rhs(equality, 1.1)
+    set_objective_coefficient(model, x, 2.0)
+    optimize!(model)
+    @test MOI.get(optimizer, MOI.RawSolver()) === solver
+    @test MOI.get(
+        optimizer,
+        MOI.RawOptimizerAttribute("rebuild_count"),
+    ) == rebuild_count
+    @test value(x) ≈ 1.1 / 1.5 atol = 2e-7
+
+    MOI.set(
+        optimizer,
+        MOI.RawOptimizerAttribute("kkt_backend"),
+        :qdldl,
+    )
+    optimize!(model)
+    @test MOI.get(
+        optimizer,
+        MOI.RawOptimizerAttribute("active_kkt_backend"),
+    ) == :qdldl
+    @test MOI.get(
+        optimizer,
+        MOI.RawOptimizerAttribute("rebuild_count"),
+    ) == rebuild_count + 1
+end
+
 @testset "JuMP direct-model repeated SCP updates" begin
     model = JuMP.direct_model(
         JuliaQOCO.Optimizer(;

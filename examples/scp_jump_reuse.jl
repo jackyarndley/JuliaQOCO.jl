@@ -21,12 +21,14 @@ function build_jump_scp_case(;
     nu::Int = 2,
     direct::Bool = true,
     reuse_solver::Bool = true,
+    kkt_backend::Symbol = :qdldl,
 )
     optimizer = JuliaQOCO.Optimizer(;
         verbose = false,
         reuse_solver,
         scaling_mode = :once,
         warm_start_mode = :primal_dual,
+        kkt_backend,
     )
     model = direct ? JuMP.direct_model(optimizer) :
             JuMP.Model(() -> optimizer)

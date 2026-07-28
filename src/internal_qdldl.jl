@@ -7,6 +7,7 @@
 module InternalQDLDL
 
 export qdldl, \, solve, solve!, refactor!, update_values!, scale_values!, positive_inertia, regularized_entries
+export generate_factorization, is_generated
 
 using AMD, SparseArrays
 using LinearAlgebra: istriu, triu, Diagonal
@@ -129,6 +130,7 @@ struct QDLDLFactorisation{
     TP<:Union{Nothing,Vector{Ti}},
     TIP<:Union{Nothing,Vector{Ti}},
     TW<:QDLDLWorkspace{Tf,Ti},
+    TG,
 }
 
     #permutation vector (nothing if no permutation)
@@ -143,7 +145,31 @@ struct QDLDLFactorisation{
     workspace::TW
     #is it logical factorisation only?
     logical::Ref{Bool}
+    #zero-sized fixed-pattern kernel descriptor, or nothing
+    generated_pattern::TG
 end
+
+"""
+Compile-time representation of a fixed solver sparsity pattern.
+
+The tuple values are type parameters, so Julia generates numeric
+factorization, triangular-solve, and sparse-product methods per distinct
+pattern. The value is zero-sized and identical patterns reuse the same
+compiled specializations without a mutable global cache.
+"""
+struct GeneratedSparseOps{PCP,PRI,ACP,ARI,GCP,GRI} end
+
+struct GeneratedPattern{
+    AP,
+    AI,
+    LP,
+    LI,
+    ROWPTR,
+    ROWCOLS,
+    ROWVALS,
+    HAS_SIGNS,
+    SPARSE_OPS,
+} end
 
 
 
@@ -222,8 +248,57 @@ function qdldl(A::SparseMatrixCSC{Tf,Ti};
     #Psss a Ref{Bool} to the constructor since QDLDLFactorisation
     #is immutable.   All internal functions will just use a Bool
 
-    return QDLDLFactorisation(perm, iperm, L, Dinv, workspace, Ref{Bool}(logical))
+    return QDLDLFactorisation(
+        perm,
+        iperm,
+        L,
+        Dinv,
+        workspace,
+        Ref{Bool}(logical),
+        nothing,
+    )
 
+end
+
+is_generated(F::QDLDLFactorisation) = F.generated_pattern !== nothing
+
+function generate_factorization(
+    F::QDLDLFactorisation,
+    P::SparseMatrixCSC,
+    A::SparseMatrixCSC,
+    G::SparseMatrixCSC,
+)
+    F.logical[] && throw(ArgumentError("cannot generate kernels for a logical factorization"))
+    workspace = F.workspace
+    workspace.pattern_initialized[] ||
+        throw(ArgumentError("the QDLDL numeric pattern has not been initialized"))
+    pattern = GeneratedPattern{
+        Tuple(workspace.triuA.colptr),
+        Tuple(workspace.triuA.rowval),
+        Tuple(workspace.Lp),
+        Tuple(workspace.Li),
+        Tuple(workspace.rowptr),
+        Tuple(workspace.rowcols),
+        Tuple(workspace.rowvals),
+        workspace.Dsigns !== nothing,
+        GeneratedSparseOps{
+            Tuple(P.colptr),
+            Tuple(P.rowval),
+            Tuple(A.colptr),
+            Tuple(A.rowval),
+            Tuple(G.colptr),
+            Tuple(G.rowval),
+        },
+    }()
+    return QDLDLFactorisation(
+        F.perm,
+        F.iperm,
+        F.L,
+        F.Dinv,
+        workspace,
+        F.logical,
+        pattern,
+    )
 end
 
 function positive_inertia(F::QDLDLFactorisation)
@@ -335,7 +410,40 @@ function refactor!(F::QDLDLFactorisation)
 
     F.logical[] = false  #in case not already
 
-    factor!(F.workspace,F.logical[])
+    _refactor!(F.generated_pattern, F.workspace, F.logical[])
+    return nothing
+end
+
+@inline function _refactor!(
+    ::Nothing,
+    workspace::QDLDLWorkspace,
+    logical::Bool,
+)
+    factor!(workspace, logical)
+    return nothing
+end
+
+@inline function _refactor!(
+    pattern::GeneratedPattern,
+    workspace::QDLDLWorkspace,
+    ::Bool,
+)
+    positive_inertia = _generated_numeric_factor!(
+        pattern,
+        workspace.triuA.nzval,
+        workspace.Lx,
+        workspace.D,
+        workspace.Dinv,
+        workspace.factor_fwork,
+        workspace.Dsigns,
+        workspace.regularize_eps,
+        workspace.regularize_delta,
+        workspace.regularize_count,
+    )
+    positive_inertia < 0 &&
+        error("Zero entry in D (matrix is not quasidefinite)")
+    workspace.positive_inertia[] = positive_inertia
+    return nothing
 end
 
 
@@ -427,12 +535,15 @@ function solve!(F::QDLDLFactorisation,b)
     #permute b
     tmp = perm === nothing ? b : permute!(F.workspace.solve_fwork,b,perm)
 
-    QDLDL_solve!(F.workspace.Ln,
-                 F.workspace.Lp,
-                 F.workspace.Li,
-                 F.workspace.Lx,
-                 F.workspace.Dinv,
-                 tmp)
+    _solve_factor!(
+        F.generated_pattern,
+        F.workspace.Ln,
+        F.workspace.Lp,
+        F.workspace.Li,
+        F.workspace.Lx,
+        F.workspace.Dinv,
+        tmp,
+    )
 
     #inverse permutation
     if perm !== nothing
@@ -440,6 +551,91 @@ function solve!(F::QDLDLFactorisation,b)
     end
 
     return nothing
+end
+
+@inline function _solve_factor!(::Nothing, n, Lp, Li, Lx, Dinv, x)
+    QDLDL_solve!(n, Lp, Li, Lx, Dinv, x)
+    return nothing
+end
+
+@inline function _solve_factor!(
+    pattern::GeneratedPattern,
+    ::Integer,
+    ::AbstractVector,
+    ::AbstractVector,
+    Lx,
+    Dinv,
+    x,
+)
+    _generated_solve_factor!(pattern, Lx, Dinv, x)
+    return nothing
+end
+
+@generated function _generated_solve_factor!(
+    ::GeneratedPattern{
+        AP,
+        AI,
+        LP,
+        LI,
+        ROWPTR,
+        ROWCOLS,
+        ROWVALS,
+        HAS_SIGNS,
+        SPARSE_OPS,
+    },
+    Lx::AbstractVector{T},
+    Dinv::AbstractVector{T},
+    x::AbstractVector{T},
+) where {
+    AP,
+    AI,
+    LP,
+    LI,
+    ROWPTR,
+    ROWCOLS,
+    ROWVALS,
+    HAS_SIGNS,
+    SPARSE_OPS,
+    T,
+}
+    n = length(LP) - 1
+    body = Expr(:block)
+    for row in 1:n
+        xrow = gensym(:xrow)
+        push!(body.args, :($xrow = x[$row]))
+        positions = collect(ROWPTR[row]:(ROWPTR[row + 1] - 1))
+        sort!(positions; by = position -> ROWCOLS[position])
+        for row_position in positions
+            column = ROWCOLS[row_position]
+            value_position = ROWVALS[row_position]
+            push!(
+                body.args,
+                :($xrow = muladd(-Lx[$value_position], x[$column], $xrow)),
+            )
+        end
+        push!(body.args, :(x[$row] = $xrow))
+    end
+    for i in 1:n
+        push!(body.args, :(x[$i] *= Dinv[$i]))
+    end
+    for column in n:-1:1
+        xcolumn = gensym(:xcolumn)
+        push!(body.args, :($xcolumn = x[$column]))
+        for position in LP[column]:(LP[column + 1] - 1)
+            row = LI[position]
+            push!(
+                body.args,
+                :($xcolumn = muladd(-Lx[$position], x[$row], $xcolumn)),
+            )
+        end
+        push!(body.args, :(x[$column] = $xcolumn))
+    end
+    push!(body.args, :(return nothing))
+    return quote
+        @inbounds begin
+            $body
+        end
+    end
 end
 
 
@@ -810,6 +1006,100 @@ function QDLDL_numeric_factor!(
     end
 
     return positiveValuesInD
+end
+
+@generated function _generated_numeric_factor!(
+    ::GeneratedPattern{
+        AP,
+        AI,
+        LP,
+        LI,
+        ROWPTR,
+        ROWCOLS,
+        ROWVALS,
+        HAS_SIGNS,
+        SPARSE_OPS,
+    },
+    Ax::AbstractVector{T},
+    Lx::AbstractVector{T},
+    D::AbstractVector{T},
+    Dinv::AbstractVector{T},
+    yVals::AbstractVector{T},
+    Dsigns,
+    regularize_eps::T,
+    regularize_delta::T,
+    regularize_count,
+) where {
+    AP,
+    AI,
+    LP,
+    LI,
+    ROWPTR,
+    ROWCOLS,
+    ROWVALS,
+    HAS_SIGNS,
+    SPARSE_OPS,
+    T,
+}
+    n = length(AP) - 1
+    body = Expr(:block)
+    push!(body.args, :(regularize_count[1] = 0))
+    push!(body.args, :(positive_values = 0))
+    for k in 1:n
+        Dk = gensym(:Dk)
+        diagonal_position = 0
+        for position in AP[k]:(AP[k + 1] - 1)
+            if AI[position] == k
+                diagonal_position = position
+            else
+                push!(body.args, :(yVals[$(AI[position])] = Ax[$position]))
+            end
+        end
+        diagonal_position == 0 &&
+            error("generated QDLDL pattern is missing diagonal entry $k")
+        push!(body.args, :($Dk = Ax[$diagonal_position]))
+
+        for row_position in ROWPTR[k]:(ROWPTR[k + 1] - 1)
+            column = ROWCOLS[row_position]
+            value_position = ROWVALS[row_position]
+            yvalue = gensym(:yvalue)
+            lvalue = gensym(:lvalue)
+            push!(body.args, :($yvalue = yVals[$column]))
+            for value_index in LP[column]:(value_position - 1)
+                row = LI[value_index]
+                push!(
+                    body.args,
+                    :(yVals[$row] = muladd(-Lx[$value_index], $yvalue, yVals[$row])),
+                )
+            end
+            push!(body.args, :($lvalue = $yvalue * Dinv[$column]))
+            push!(body.args, :(Lx[$value_position] = $lvalue))
+            push!(body.args, :($Dk = muladd(-$yvalue, $lvalue, $Dk)))
+            push!(body.args, :(yVals[$column] = zero(T)))
+        end
+
+        if HAS_SIGNS
+            push!(
+                body.args,
+                quote
+                    if Dsigns[$k] * $Dk < regularize_eps
+                        $Dk = regularize_delta * Dsigns[$k]
+                        regularize_count[1] += 1
+                    end
+                end,
+            )
+        end
+        push!(body.args, :($Dk == zero(T) && return -1))
+        push!(body.args, :(D[$k] = $Dk))
+        push!(body.args, :(positive_values += $Dk > zero(T)))
+        push!(body.args, :(Dinv[$k] = inv($Dk)))
+    end
+    push!(body.args, :(return positive_values))
+    return quote
+        @inbounds begin
+            $body
+        end
+    end
 end
 
 # Solves (L+I)x = b, with x replacing b

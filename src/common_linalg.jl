@@ -201,3 +201,274 @@ function mul_upper_symmetric!(y::AbstractVector{T}, P::SparseMatrixCSC{T,Ti}, x:
     end
     return y
 end
+
+@generated function generated_mul_upper_symmetric!(
+    y::AbstractVector{T},
+    values::AbstractVector{T},
+    x::AbstractVector{T},
+    ::QDLDL.GeneratedPattern{
+        AP,
+        AI,
+        LP,
+        LI,
+        ROWPTR,
+        ROWCOLS,
+        ROWVALS,
+        HAS_SIGNS,
+        QDLDL.GeneratedSparseOps{PCP,PRI,ACP,ARI,GCP,GRI},
+    },
+) where {
+    T,
+    AP,
+    AI,
+    LP,
+    LI,
+    ROWPTR,
+    ROWCOLS,
+    ROWVALS,
+    HAS_SIGNS,
+    PCP,
+    PRI,
+    ACP,
+    ARI,
+    GCP,
+    GRI,
+}
+    body = Expr(:block)
+    push!(body.args, :(fill!(y, zero(T))))
+    for column in 1:(length(PCP) - 1)
+        xcolumn = gensym(:xcolumn)
+        push!(body.args, :($xcolumn = x[$column]))
+        for position in PCP[column]:(PCP[column + 1] - 1)
+            row = PRI[position]
+            push!(
+                body.args,
+                :(y[$row] = muladd(values[$position], $xcolumn, y[$row])),
+            )
+            if row != column
+                push!(
+                    body.args,
+                    :(y[$column] = muladd(values[$position], x[$row], y[$column])),
+                )
+            end
+        end
+    end
+    push!(body.args, :(return y))
+    return quote
+        @inbounds begin
+            $body
+        end
+    end
+end
+
+@generated function generated_mul_A!(
+    y::AbstractVector{T},
+    values::AbstractVector{T},
+    x::AbstractVector{T},
+    ::QDLDL.GeneratedPattern{
+        AP,
+        AI,
+        LP,
+        LI,
+        ROWPTR,
+        ROWCOLS,
+        ROWVALS,
+        HAS_SIGNS,
+        QDLDL.GeneratedSparseOps{PCP,PRI,ACP,ARI,GCP,GRI},
+    },
+) where {
+    T,
+    AP,
+    AI,
+    LP,
+    LI,
+    ROWPTR,
+    ROWCOLS,
+    ROWVALS,
+    HAS_SIGNS,
+    PCP,
+    PRI,
+    ACP,
+    ARI,
+    GCP,
+    GRI,
+}
+    body = Expr(:block)
+    push!(body.args, :(fill!(y, zero(T))))
+    for column in 1:(length(ACP) - 1)
+        xcolumn = gensym(:xcolumn)
+        push!(body.args, :($xcolumn = x[$column]))
+        for position in ACP[column]:(ACP[column + 1] - 1)
+            row = ARI[position]
+            push!(
+                body.args,
+                :(y[$row] = muladd(values[$position], $xcolumn, y[$row])),
+            )
+        end
+    end
+    push!(body.args, :(return y))
+    return quote
+        @inbounds begin
+            $body
+        end
+    end
+end
+
+@generated function generated_mul_At!(
+    y::AbstractVector{T},
+    values::AbstractVector{T},
+    x::AbstractVector{T},
+    ::QDLDL.GeneratedPattern{
+        AP,
+        AI,
+        LP,
+        LI,
+        ROWPTR,
+        ROWCOLS,
+        ROWVALS,
+        HAS_SIGNS,
+        QDLDL.GeneratedSparseOps{PCP,PRI,ACP,ARI,GCP,GRI},
+    },
+) where {
+    T,
+    AP,
+    AI,
+    LP,
+    LI,
+    ROWPTR,
+    ROWCOLS,
+    ROWVALS,
+    HAS_SIGNS,
+    PCP,
+    PRI,
+    ACP,
+    ARI,
+    GCP,
+    GRI,
+}
+    body = Expr(:block)
+    for column in 1:(length(ACP) - 1)
+        acc = gensym(:acc)
+        push!(body.args, :($acc = zero(T)))
+        for position in ACP[column]:(ACP[column + 1] - 1)
+            row = ARI[position]
+            push!(
+                body.args,
+                :($acc = muladd(values[$position], x[$row], $acc)),
+            )
+        end
+        push!(body.args, :(y[$column] = $acc))
+    end
+    push!(body.args, :(return y))
+    return quote
+        @inbounds begin
+            $body
+        end
+    end
+end
+
+@generated function generated_mul_G!(
+    y::AbstractVector{T},
+    values::AbstractVector{T},
+    x::AbstractVector{T},
+    ::QDLDL.GeneratedPattern{
+        AP,
+        AI,
+        LP,
+        LI,
+        ROWPTR,
+        ROWCOLS,
+        ROWVALS,
+        HAS_SIGNS,
+        QDLDL.GeneratedSparseOps{PCP,PRI,ACP,ARI,GCP,GRI},
+    },
+) where {
+    T,
+    AP,
+    AI,
+    LP,
+    LI,
+    ROWPTR,
+    ROWCOLS,
+    ROWVALS,
+    HAS_SIGNS,
+    PCP,
+    PRI,
+    ACP,
+    ARI,
+    GCP,
+    GRI,
+}
+    body = Expr(:block)
+    push!(body.args, :(fill!(y, zero(T))))
+    for column in 1:(length(GCP) - 1)
+        xcolumn = gensym(:xcolumn)
+        push!(body.args, :($xcolumn = x[$column]))
+        for position in GCP[column]:(GCP[column + 1] - 1)
+            row = GRI[position]
+            push!(
+                body.args,
+                :(y[$row] = muladd(values[$position], $xcolumn, y[$row])),
+            )
+        end
+    end
+    push!(body.args, :(return y))
+    return quote
+        @inbounds begin
+            $body
+        end
+    end
+end
+
+@generated function generated_mul_Gt!(
+    y::AbstractVector{T},
+    values::AbstractVector{T},
+    x::AbstractVector{T},
+    ::QDLDL.GeneratedPattern{
+        AP,
+        AI,
+        LP,
+        LI,
+        ROWPTR,
+        ROWCOLS,
+        ROWVALS,
+        HAS_SIGNS,
+        QDLDL.GeneratedSparseOps{PCP,PRI,ACP,ARI,GCP,GRI},
+    },
+) where {
+    T,
+    AP,
+    AI,
+    LP,
+    LI,
+    ROWPTR,
+    ROWCOLS,
+    ROWVALS,
+    HAS_SIGNS,
+    PCP,
+    PRI,
+    ACP,
+    ARI,
+    GCP,
+    GRI,
+}
+    body = Expr(:block)
+    for column in 1:(length(GCP) - 1)
+        acc = gensym(:acc)
+        push!(body.args, :($acc = zero(T)))
+        for position in GCP[column]:(GCP[column + 1] - 1)
+            row = GRI[position]
+            push!(
+                body.args,
+                :($acc = muladd(values[$position], x[$row], $acc)),
+            )
+        end
+        push!(body.args, :(y[$column] = $acc))
+    end
+    push!(body.args, :(return y))
+    return quote
+        @inbounds begin
+            $body
+        end
+    end
+end

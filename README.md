@@ -56,6 +56,72 @@ propagated through precomputed maps from the MOI term to native CSC storage,
 the cached transpose, KKT storage, and permuted QDLDL numerical storage.
 Symbolic analysis and the factor sparsity are retained.
 
+### Generated fixed-pattern KKT backend
+
+For a small, repeatedly solved structure, JuliaQOCO can compile the
+fixed-pattern linear algebra into straight-line methods whose sparse
+positions are constants:
+
+```julia
+model = direct_model(
+    JuliaQOCO.Optimizer(;
+        verbose = false,
+        reuse_solver = true,
+        scaling_mode = :once,
+        warm_start_mode = :primal_dual,
+        kkt_backend = :generated,
+    ),
+)
+```
+
+This remains a normal JuMP workflow: build through JuMP, modify through JuMP
+or MOI, and call `optimize!`. The generated method is selected internally
+after the first MOI-to-native assembly. Fixed-pattern updates retain the
+native solver, symbolic analysis, factor storage, generated code, and
+primal-dual iterate.
+
+The generated kernel family includes:
+
+- QDLDL numeric refactorization using the cached symbolic row map;
+- row-oriented forward substitution and fixed-pattern triangular solves;
+- symmetric Hessian products;
+- `A`, `A'`, `G`, and `G'` products used by residual evaluation and
+  iterative refinement.
+
+JuliaQOCO's structured O(q) second-order-cone scaling and Nesterov-Todd
+matvecs remain in their compact loop form. Benchmarks showed that these
+kernels were already too small to justify generating dense cone operations.
+This design follows
+[QOCOGEN's](https://github.com/qoco-org/qocogen)
+[fixed-pattern linear-algebra approach](https://arxiv.org/abs/2503.12658)
+while retaining JuliaQOCO's native solver and JuMP/MOI update cache.
+
+`kkt_backend` accepts:
+
+- `:qdldl` (default): cached symbolic QDLDL with its compact numeric loop;
+- `:generated`: compile fixed-pattern factorization, solve, and sparse-product
+  kernels for this exact problem structure;
+- `:auto`: generate only when the KKT dimension and factor nonzeros do not
+  exceed `generated_max_dimension` and `generated_max_factor_nnz`.
+
+The limits used by `:auto` default to 384 and 3,000 respectively. First use
+of a new pattern can take seconds because Julia must compile a large method;
+that cost is included in solver setup time. An identical pattern in the same
+Julia process shares the method specialization and does not pay that
+compilation cost again. Use `:generated` for long-lived applications that
+instantiate or solve the same small structure many times, not for one-off
+models or many unrelated large patterns. `:qdldl` remains the best
+general-purpose choice.
+
+Inspect the selected backend with:
+
+```julia
+MOI.get(
+    backend(model),
+    MOI.RawOptimizerAttribute("active_kkt_backend"),
+)
+```
+
 ## Directly supported forms
 
 The direct optimizer supports:
@@ -87,7 +153,7 @@ The following operations deliberately rebuild on the next `optimize!`:
 - changing cone type or dimension;
 - changing between finite and infinite bounds;
 - adding a coefficient that has no cached sparse entry;
-- changing scaling or KKT regularization settings.
+- changing scaling, KKT regularization, or KKT backend settings.
 
 JuMP variable and constraint references remain valid after a rebuild.
 
@@ -164,6 +230,7 @@ Run the dedicated JuMP and native benchmarks:
 julia --project=benchmark benchmark/jump_repeated_solves.jl
 julia --project=. benchmark/native_repeated_solves.jl
 julia --project=benchmark benchmark/scp_like_benchmark.jl
+julia --project=benchmark benchmark/generated_kkt_backend.jl
 ```
 
 The JuMP benchmark separates construction, fresh solves, unchanged cached
@@ -171,6 +238,11 @@ solves, vector updates, full and sparse matrix updates, forced rebuilds,
 structural rebuilds, and the native indexed-update lower bound. It reports
 time, allocations, setup/solve time, iterations, KKT nonzeros, and factor
 nonzeros.
+
+The generated-backend benchmark reports first-pattern and already-compiled
+same-pattern setup separately, numeric-refactor, triangular-solve,
+KKT-product, and complete repeated-solve times, speedups, allocations,
+KKT/factor nonzeros, and a JuMP `direct_model` comparison.
 
 ## Development
 

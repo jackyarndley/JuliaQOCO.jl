@@ -324,7 +324,15 @@ function MOI.set(opt::Optimizer, attr::MOI.RawOptimizerAttribute, value)
         setfield!(opt.settings, name, converted)
         if converted != old_value
             opt.settings_dirty = true
-            if name in (:scaling_mode, :ruiz_iters, :kkt_static_reg, :kkt_dynamic_reg)
+            if name in (
+                :scaling_mode,
+                :ruiz_iters,
+                :kkt_static_reg,
+                :kkt_dynamic_reg,
+                :kkt_backend,
+                :generated_max_dimension,
+                :generated_max_factor_nnz,
+            )
                 _mark_structure_dirty!(opt)
             else
                 _mark_numeric_dirty!(opt)
@@ -342,6 +350,8 @@ function MOI.get(opt::Optimizer, attr::MOI.RawOptimizerAttribute)
         return opt.rebuild_count
     elseif attr.name == "last_commit_time_sec"
         return opt.cache === nothing ? 0.0 : opt.cache.last_commit_time_sec
+    elseif attr.name == "active_kkt_backend"
+        return opt.cache === nothing ? :none : active_kkt_backend(opt.cache.solver)
     end
     name = Symbol(attr.name)
     if name in fieldnames(typeof(opt.settings))
