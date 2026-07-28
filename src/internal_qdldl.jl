@@ -6,7 +6,7 @@
 # See `licenses\\QDLDL-LICENSE` for the upstream license text.
 module InternalQDLDL
 
-export qdldl, \, solve, solve!, refactor!, update_values!, scale_values!,  positive_inertia, regularized_entries
+export qdldl, \, solve, solve!, refactor!, update_values!, scale_values!, positive_inertia, regularized_entries
 
 using AMD, SparseArrays
 using LinearAlgebra: istriu, triu, Diagonal
@@ -252,6 +252,15 @@ end
 
 @inline function update_values!(F::QDLDLFactorisation{Tf,Ti}, index::Ti, value::Tf) where {Tf<:Real,Ti<:Integer}
     F.workspace.triuA.nzval[_mapped_index(F.workspace.AtoPAPt, index)] = value
+    return nothing
+end
+
+@inline function update_value_internal!(
+    F::QDLDLFactorisation{Tf,Ti},
+    index::Ti,
+    value::Tf,
+) where {Tf<:Real,Ti<:Integer}
+    F.workspace.triuA.nzval[index] = value
     return nothing
 end
 

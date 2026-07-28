@@ -12,6 +12,9 @@ Base.@kwdef mutable struct Settings{T<:AbstractFloat}
     reltol_inacc::T = T(1e-5)
     verbose::Bool = true
     profile::Bool = false
+    reuse_solver::Bool = true
+    scaling_mode::Symbol = :recompute
+    warm_start_mode::Symbol = :primal_dual
     output::IO = stdout
 end
 
@@ -30,6 +33,9 @@ function copy_settings(settings::Settings{T}) where {T<:AbstractFloat}
         reltol_inacc = settings.reltol_inacc,
         verbose = settings.verbose,
         profile = settings.profile,
+        reuse_solver = settings.reuse_solver,
+        scaling_mode = settings.scaling_mode,
+        warm_start_mode = settings.warm_start_mode,
         output = settings.output,
     )
 end
@@ -46,5 +52,9 @@ function validate_settings(settings::Settings)
     settings.reltol_inacc >= 0 || throw(ArgumentError("reltol_inacc must be nonnegative"))
     settings.kkt_static_reg > 0 || throw(ArgumentError("kkt_static_reg must be positive"))
     settings.kkt_dynamic_reg > 0 || throw(ArgumentError("kkt_dynamic_reg must be positive"))
+    settings.scaling_mode in (:none, :once, :recompute) ||
+        throw(ArgumentError("scaling_mode must be :none, :once, or :recompute"))
+    settings.warm_start_mode in (:none, :primal, :primal_dual, :adaptive) ||
+        throw(ArgumentError("warm_start_mode must be :none, :primal, :primal_dual, or :adaptive"))
     return settings
 end

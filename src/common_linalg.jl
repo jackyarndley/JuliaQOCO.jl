@@ -95,6 +95,24 @@ function create_transposed_matrix_with_map(A::SparseMatrixCSC{T,Ti}) where {T,Ti
     return SparseMatrixCSC(n, m, colptr, rowval, nzval), to_original
 end
 
+function inverse_entry_map(transposed_to_original::AbstractVector{Ti}) where {Ti<:Integer}
+    original_to_transposed = Vector{Ti}(undef, length(transposed_to_original))
+    @inbounds for transposed_index in eachindex(transposed_to_original)
+        original_to_transposed[transposed_to_original[transposed_index]] = Ti(transposed_index)
+    end
+    return original_to_transposed
+end
+
+function entry_columns(A::SparseMatrixCSC{T,Ti}) where {T,Ti<:Integer}
+    columns = Vector{Ti}(undef, nnz(A))
+    @inbounds for col in 1:size(A, 2)
+        for position in A.colptr[col]:(A.colptr[col + 1] - 1)
+            columns[position] = Ti(col)
+        end
+    end
+    return columns
+end
+
 function shift_diag!(P::SparseMatrixCSC{T,Ti}, reg::T) where {T<:AbstractFloat,Ti<:Integer}
     @inbounds for j in 1:size(P, 2)
         for k in P.colptr[j]:(P.colptr[j + 1] - 1)

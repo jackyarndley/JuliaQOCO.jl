@@ -34,6 +34,8 @@ function _workspace(data::ProblemData{T,Ti}) where {T<:AbstractFloat,Ti<:Integer
         zeros(T, Wfullnnz),
         zeros(T, Wfullnnz),
         zeros(T, data.m),
+        ones(T, length(data.q)),
+        zeros(T, data.m),
         zeros(T, maxq),
         zeros(T, maxq),
         zeros(T, data.n),
@@ -82,17 +84,24 @@ function _problem_data(
 
     At0, AtoAt = create_transposed_matrix_with_map(A0)
     Gt0, GtoGt = create_transposed_matrix_with_map(G0)
+    AfromAt = inverse_entry_map(AtoAt)
+    GfromGt = inverse_entry_map(GtoGt)
     P1, Padded_idx = regularize_P_with_info(P0, zero(T))
     data = ProblemData{T,Ti}(
         P1,
+        entry_columns(P1),
         collect(c),
         A0,
+        entry_columns(A0),
         At0,
         AtoAt,
+        AfromAt,
         b0,
         G0,
+        entry_columns(G0),
         Gt0,
         GtoGt,
+        GfromGt,
         h0,
         Ti(l),
         qv,
@@ -104,7 +113,11 @@ function _problem_data(
         false,
     )
     scaling = initialize_scaling(data)
-    ruiz_equilibration!(data, scaling, settings.ruiz_iters)
+    ruiz_equilibration!(
+        data,
+        scaling,
+        settings.scaling_mode == :none ? 0 : settings.ruiz_iters,
+    )
     regularize_existing_P!(data.P, settings.kkt_static_reg)
     return data, scaling
 end
@@ -285,48 +298,12 @@ function _print_footer(solver::Solver{T}) where {T<:AbstractFloat}
     return nothing
 end
 
-function solve!(solver::Solver{T}) where {T<:AbstractFloat}
-    validate_settings(solver.settings)
-    solver.solution.status = QOCO_UNSOLVED
-    solver.solution.status_detail = ""
-    solver.solution.iters = 0
-    reset_solve_profile!(solver.solution.profile)
-    t0 = time_ns()
-    if solver.settings.verbose
-        _print_header(solver)
-    end
-    if solver.data.n + solver.data.p + solver.data.m == 0
-        solver.solution.status = QOCO_SOLVED
-        solver.solution.status_detail = "empty problem"
-        solver.solution.obj = zero(T)
-        solver.solution.pres = zero(T)
-        solver.solution.dres = zero(T)
-        solver.solution.gap = zero(T)
-        solver.solution.solve_time_sec = elapsed_time_sec(t0)
-        _cache_solution_as_warmstart!(solver)
-        if solver.settings.verbose
-            _print_footer(solver)
-        end
-        return solver
-    end
-    tphase = time_ns()
-    initialize_ipm!(solver)
-    solver.solution.profile.initialize_time_sec += elapsed_time_sec(tphase)
-
+function _solve_fast_loop!(solver::Solver{T}, t0::UInt64) where {T<:AbstractFloat}
     for iter in 1:solver.settings.max_iters
-        tphase = time_ns()
         compute_kkt_residual!(solver)
-        solver.solution.profile.residual_time_sec += elapsed_time_sec(tphase)
-        tphase = time_ns()
         compute_objective!(solver)
-        solver.solution.profile.objective_time_sec += elapsed_time_sec(tphase)
-        tphase = time_ns()
         compute_mu!(solver)
-        solver.solution.profile.mu_time_sec += elapsed_time_sec(tphase)
-
-        tphase = time_ns()
         if check_stopping!(solver)
-            solver.solution.profile.stopping_time_sec += elapsed_time_sec(tphase)
             solver.solution.solve_time_sec = elapsed_time_sec(t0)
             solver.solution.iters = iter - 1
             unscaled_solution!(solver.solution, solver.data, solver.scaling, solver.work)
@@ -336,17 +313,9 @@ function solve!(solver::Solver{T}) where {T<:AbstractFloat}
             end
             return solver
         end
-        solver.solution.profile.stopping_time_sec += elapsed_time_sec(tphase)
-
-        tphase = time_ns()
         compute_nt_scaling!(solver)
-        solver.solution.profile.nt_scaling_time_sec += elapsed_time_sec(tphase)
-        tphase = time_ns()
         update_nt_block!(solver)
-        solver.solution.profile.nt_update_time_sec += elapsed_time_sec(tphase)
-        tphase = time_ns()
         predictor_corrector!(solver)
-        solver.solution.profile.predictor_time_sec += elapsed_time_sec(tphase)
         solver.solution.iters = iter
         if solver.settings.verbose
             _log_iter(solver)
@@ -362,6 +331,79 @@ function solve!(solver::Solver{T}) where {T<:AbstractFloat}
         _print_footer(solver)
     end
     return solver
+end
+
+function _solve_profiled_loop!(solver::Solver{T}, t0::UInt64) where {T<:AbstractFloat}
+    for iter in 1:solver.settings.max_iters
+        tphase = time_ns()
+        compute_kkt_residual!(solver)
+        solver.solution.profile.residual_time_sec += elapsed_time_sec(tphase)
+        tphase = time_ns()
+        compute_objective!(solver)
+        solver.solution.profile.objective_time_sec += elapsed_time_sec(tphase)
+        tphase = time_ns()
+        compute_mu!(solver)
+        solver.solution.profile.mu_time_sec += elapsed_time_sec(tphase)
+        tphase = time_ns()
+        if check_stopping!(solver)
+            solver.solution.profile.stopping_time_sec += elapsed_time_sec(tphase)
+            solver.solution.solve_time_sec = elapsed_time_sec(t0)
+            solver.solution.iters = iter - 1
+            unscaled_solution!(solver.solution, solver.data, solver.scaling, solver.work)
+            _cache_solution_as_warmstart!(solver)
+            solver.settings.verbose && _print_footer(solver)
+            return solver
+        end
+        solver.solution.profile.stopping_time_sec += elapsed_time_sec(tphase)
+        tphase = time_ns()
+        compute_nt_scaling!(solver)
+        solver.solution.profile.nt_scaling_time_sec += elapsed_time_sec(tphase)
+        tphase = time_ns()
+        update_nt_block!(solver)
+        solver.solution.profile.nt_update_time_sec += elapsed_time_sec(tphase)
+        tphase = time_ns()
+        predictor_corrector!(solver)
+        solver.solution.profile.predictor_time_sec += elapsed_time_sec(tphase)
+        solver.solution.iters = iter
+        solver.settings.verbose && _log_iter(solver)
+    end
+    solver.solution.status = QOCO_MAX_ITER
+    solver.solution.status_detail = "reached iteration limit"
+    solver.solution.solve_time_sec = elapsed_time_sec(t0)
+    unscaled_solution!(solver.solution, solver.data, solver.scaling, solver.work)
+    _cache_solution_as_warmstart!(solver)
+    solver.settings.verbose && _print_footer(solver)
+    return solver
+end
+
+function solve!(solver::Solver{T}) where {T<:AbstractFloat}
+    validate_settings(solver.settings)
+    solver.solution.status = QOCO_UNSOLVED
+    solver.solution.status_detail = ""
+    solver.solution.iters = 0
+    reset_solve_profile!(solver.solution.profile)
+    t0 = time_ns()
+    solver.settings.verbose && _print_header(solver)
+    if solver.data.n + solver.data.p + solver.data.m == 0
+        solver.solution.status = QOCO_SOLVED
+        solver.solution.status_detail = "empty problem"
+        solver.solution.obj = zero(T)
+        solver.solution.pres = zero(T)
+        solver.solution.dres = zero(T)
+        solver.solution.gap = zero(T)
+        solver.solution.solve_time_sec = elapsed_time_sec(t0)
+        _cache_solution_as_warmstart!(solver)
+        solver.settings.verbose && _print_footer(solver)
+        return solver
+    end
+    if solver.settings.profile
+        tphase = time_ns()
+        initialize_ipm!(solver)
+        solver.solution.profile.initialize_time_sec += elapsed_time_sec(tphase)
+        return _solve_profiled_loop!(solver, t0)
+    end
+    initialize_ipm!(solver)
+    return _solve_fast_loop!(solver, t0)
 end
 
 function solve(

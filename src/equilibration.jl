@@ -46,6 +46,10 @@ function initialize_scaling(data::ProblemData{T}) where {T<:AbstractFloat}
     )
 end
 
+@inline function _ruiz_inverse_sqrt(value::T) where {T<:AbstractFloat}
+    return value > T(SAFE_DIV_EPS) ? inv(sqrt(value)) : one(T)
+end
+
 function ruiz_equilibration!(data::ProblemData{T,Ti}, scaling::Scaling{T}, ruiz_iters::Int) where {T<:AbstractFloat,Ti<:Integer}
     fill!(scaling.Druiz, one(T))
     fill!(scaling.Eruiz, one(T))
@@ -90,20 +94,20 @@ function ruiz_equilibration!(data::ProblemData{T,Ti}, scaling::Scaling{T}, ruiz_
             end
         end
         @inbounds for j in eachindex(D)
-            D[j] = safe_div(one(T), sqrt(D[j]))
+            D[j] = _ruiz_inverse_sqrt(D[j])
         end
 
         if data.p > 0
             col_inf_norm_matrix!(E, data.At)
             @inbounds for k in eachindex(E)
-                E[k] = safe_div(one(T), sqrt(E[k]))
+                E[k] = _ruiz_inverse_sqrt(E[k])
             end
         end
 
         if data.m > 0
             col_inf_norm_matrix!(F, data.Gt)
             @inbounds for k in eachindex(F)
-                F[k] = safe_div(one(T), sqrt(F[k]))
+                F[k] = _ruiz_inverse_sqrt(F[k])
             end
             idx = data.l + 1
             for qk in data.q

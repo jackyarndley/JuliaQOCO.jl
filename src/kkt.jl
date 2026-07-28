@@ -128,6 +128,12 @@ function set_identity_scalings!(solver::Solver{T}) where {T<:AbstractFloat}
                 work.Winvfull[foffset + (j - 1) * q + k - 1] = ifelse(j == k, one(T), zero(T))
             end
         end
+        idx = work.soc_offsets[block]
+        work.nt_scale[block] = one(T)
+        work.nt_v[idx] = one(T)
+        @inbounds for k in 1:(q - 1)
+            work.nt_v[idx + k] = zero(T)
+        end
     end
     return nothing
 end
@@ -143,7 +149,7 @@ function update_nt_block!(solver::Solver{T}) where {T<:AbstractFloat}
     end
     QDLDL.update_values_internal!(linsys.factor, linsys.nt2kkt, linsys.nt_values)
     QDLDL.refactor!(linsys.factor)
-    solver.solution.profile.nt_refactors += 1
+    solver.settings.profile && (solver.solution.profile.nt_refactors += 1)
     return nothing
 end
 
@@ -171,24 +177,47 @@ function kkt_multiply!(y::AbstractVector{T}, x::AbstractVector{T}, data::Problem
         mul!(work.ubuff1, data.G, xpr)
         copyto!(ycon, work.ubuff1)
         if include_nt
-            nt_multiply!(work.ubuff1, work.Wfull, view(x, (n + p + 1):(n + p + m)), data, work)
-            nt_multiply!(work.ubuff2, work.Wfull, work.ubuff1, data, work)
+            nt_multiply_W!(work.ubuff1, view(x, (n + p + 1):(n + p + m)), data, work)
+            nt_multiply_W!(work.ubuff2, work.ubuff1, data, work)
             add_scaled!(ycon, -one(T), work.ubuff2)
         end
     end
     return y
 end
 
-function solve_linsys!(solver::Solver{T}, rhs::AbstractVector{T}, x::AbstractVector{T}) where {T<:AbstractFloat}
+function _solve_linsys_fast!(
+    solver::Solver{T},
+    rhs::AbstractVector{T},
+    x::AbstractVector{T},
+) where {T<:AbstractFloat}
+    copyto!(x, rhs)
+    QDLDL.solve!(solver.linsys.factor, x)
+    solver.settings.iter_ref_iters == 0 && return x
+    rhs_norm = max(one(T), inf_norm(rhs))
+    for _ in 1:solver.settings.iter_ref_iters
+        kkt_multiply!(solver.work.xyzbuff1, x, solver.data, solver.work)
+        @inbounds for i in eachindex(x)
+            solver.work.xyzbuff1[i] = rhs[i] - solver.work.xyzbuff1[i]
+        end
+        inf_norm(solver.work.xyzbuff1) <= solver.settings.iter_ref_tol * rhs_norm && break
+        QDLDL.solve!(solver.linsys.factor, solver.work.xyzbuff1)
+        add_scaled!(x, one(T), solver.work.xyzbuff1)
+    end
+    return x
+end
+
+function _solve_linsys_profiled!(
+    solver::Solver{T},
+    rhs::AbstractVector{T},
+    x::AbstractVector{T},
+) where {T<:AbstractFloat}
     profile = solver.solution.profile
     copyto!(x, rhs)
     tsolve = time_ns()
     QDLDL.solve!(solver.linsys.factor, x)
     profile.linsys_solve_time_sec += elapsed_time_sec(tsolve)
     profile.linsys_solves += 1
-
     solver.settings.iter_ref_iters == 0 && return x
-
     rhs_norm = max(one(T), inf_norm(rhs))
     for _ in 1:solver.settings.iter_ref_iters
         kkt_multiply!(solver.work.xyzbuff1, x, solver.data, solver.work)
@@ -203,6 +232,16 @@ function solve_linsys!(solver::Solver{T}, rhs::AbstractVector{T}, x::AbstractVec
         add_scaled!(x, one(T), solver.work.xyzbuff1)
     end
     return x
+end
+
+@inline function solve_linsys!(
+    solver::Solver{T},
+    rhs::AbstractVector{T},
+    x::AbstractVector{T},
+) where {T<:AbstractFloat}
+    return solver.settings.profile ?
+           _solve_linsys_profiled!(solver, rhs, x) :
+           _solve_linsys_fast!(solver, rhs, x)
 end
 
 function initialize_ipm!(solver::Solver{T}) where {T<:AbstractFloat}
@@ -288,7 +327,7 @@ function construct_kkt_aff_rhs!(solver::Solver{T}) where {T<:AbstractFloat}
     data = solver.data
     work = solver.work
     copy_negate!(work.rhs, work.kktres)
-    nt_multiply!(work.ubuff1, work.Wfull, work.lambda, data, work)
+    nt_multiply_W!(work.ubuff1, work.lambda, data, work)
     add_scaled_to!(work.rhs, data.n + data.p + 1, one(T), work.ubuff1, data.m)
     return nothing
 end
@@ -297,15 +336,15 @@ function construct_kkt_comb_rhs!(solver::Solver{T}) where {T<:AbstractFloat}
     data = solver.data
     work = solver.work
     copy_negate!(work.rhs, work.kktres)
-    nt_multiply!(work.ubuff1, work.Winvfull, work.Ds, data, work)
-    nt_multiply_from!(work.ubuff2, work.Wfull, work.xyz, data.n + data.p + 1, data, work)
+    nt_multiply_Winv!(work.ubuff1, work.Ds, data, work)
+    nt_multiply_W_from!(work.ubuff2, work.xyz, data.n + data.p + 1, data, work)
     cone_product!(work.ubuff3, work.ubuff1, work.ubuff2, data.l, data.q)
     subtract_e!(work.ubuff3, work.sigma * work.mu, data.l, data.q)
     cone_product!(work.ubuff1, work.lambda, work.lambda, data.l, data.q)
     copy_negate!(work.Ds, work.ubuff1)
     add_scaled!(work.Ds, -one(T), work.ubuff3)
     cone_division!(work.ubuff2, work.lambda, work.Ds, data.l, data.q)
-    nt_multiply!(work.ubuff1, work.Wfull, work.ubuff2, data, work)
+    nt_multiply_W!(work.ubuff1, work.ubuff2, data, work)
     add_scaled_to!(work.rhs, data.n + data.p + 1, -one(T), work.ubuff1, data.m)
     return nothing
 end
@@ -334,11 +373,11 @@ function predictor_corrector!(solver::Solver{T}) where {T<:AbstractFloat}
     construct_kkt_aff_rhs!(solver)
     solve_linsys!(solver, work.rhs, work.xyz)
 
-    nt_multiply_from!(work.ubuff1, work.Wfull, work.xyz, Dz_offset, data, work)
+    nt_multiply_W_from!(work.ubuff1, work.xyz, Dz_offset, data, work)
     @inbounds for i in eachindex(work.ubuff1)
         work.ubuff1[i] = -work.ubuff1[i] - work.lambda[i]
     end
-    nt_multiply!(work.Ds, work.Wfull, work.ubuff1, data, work)
+    nt_multiply_W!(work.Ds, work.ubuff1, data, work)
 
     compute_centering!(solver)
     construct_kkt_comb_rhs!(solver)
@@ -350,11 +389,11 @@ function predictor_corrector!(solver::Solver{T}) where {T<:AbstractFloat}
     end
 
     cone_division!(work.ubuff1, work.lambda, work.Ds, data.l, data.q)
-    nt_multiply_from!(work.ubuff2, work.Wfull, work.xyz, Dz_offset, data, work)
+    nt_multiply_W_from!(work.ubuff2, work.xyz, Dz_offset, data, work)
     @inbounds for i in eachindex(work.ubuff3)
         work.ubuff3[i] = work.ubuff1[i] - work.ubuff2[i]
     end
-    nt_multiply!(work.Ds, work.Wfull, work.ubuff3, data, work)
+    nt_multiply_W!(work.Ds, work.ubuff3, data, work)
 
     a = min(linesearch!(solver, work.s, work.Ds, T(0.99)), linesearch_from!(solver, work.z, work.xyz, Dz_offset, T(0.99)))
     work.a = a

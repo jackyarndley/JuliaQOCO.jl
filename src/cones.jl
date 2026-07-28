@@ -145,6 +145,95 @@ function nt_multiply_from!(z::AbstractVector{T}, Wfull::AbstractVector{T}, x::Ab
     return z
 end
 
+function nt_multiply_W!(
+    z::AbstractVector{T},
+    x::AbstractVector{T},
+    data::ProblemData{T},
+    work::Workspace{T,Ti},
+) where {T<:AbstractFloat,Ti<:Integer}
+    @inbounds for i in 1:data.l
+        z[i] = work.Wfull[i] * x[i]
+    end
+    for (block, q) in enumerate(data.q)
+        idx = work.soc_offsets[block]
+        scale = work.nt_scale[block]
+        dot_v_x = zero(T)
+        @inbounds for k in 0:(q - 1)
+            dot_v_x += work.nt_v[idx + k] * x[idx + k]
+        end
+        @inbounds begin
+            z[idx] = scale * (T(2) * work.nt_v[idx] * dot_v_x - x[idx])
+            for k in 1:(q - 1)
+                z[idx + k] =
+                    scale * (T(2) * work.nt_v[idx + k] * dot_v_x + x[idx + k])
+            end
+        end
+    end
+    return z
+end
+
+function nt_multiply_W_from!(
+    z::AbstractVector{T},
+    x::AbstractVector{T},
+    xoffset::Int,
+    data::ProblemData{T},
+    work::Workspace{T,Ti},
+) where {T<:AbstractFloat,Ti<:Integer}
+    @inbounds for i in 1:data.l
+        z[i] = work.Wfull[i] * x[xoffset + i - 1]
+    end
+    for (block, q) in enumerate(data.q)
+        idx = work.soc_offsets[block]
+        scale = work.nt_scale[block]
+        dot_v_x = zero(T)
+        @inbounds for k in 0:(q - 1)
+            dot_v_x += work.nt_v[idx + k] * x[xoffset + idx + k - 1]
+        end
+        @inbounds begin
+            z[idx] = scale * (
+                T(2) * work.nt_v[idx] * dot_v_x -
+                x[xoffset + idx - 1]
+            )
+            for k in 1:(q - 1)
+                z[idx + k] = scale * (
+                    T(2) * work.nt_v[idx + k] * dot_v_x +
+                    x[xoffset + idx + k - 1]
+                )
+            end
+        end
+    end
+    return z
+end
+
+function nt_multiply_Winv!(
+    z::AbstractVector{T},
+    x::AbstractVector{T},
+    data::ProblemData{T},
+    work::Workspace{T,Ti},
+) where {T<:AbstractFloat,Ti<:Integer}
+    @inbounds for i in 1:data.l
+        z[i] = work.Winvfull[i] * x[i]
+    end
+    for (block, q) in enumerate(data.q)
+        idx = work.soc_offsets[block]
+        invscale = safe_div(one(T), work.nt_scale[block])
+        dot_jv_x = work.nt_v[idx] * x[idx]
+        @inbounds for k in 1:(q - 1)
+            dot_jv_x -= work.nt_v[idx + k] * x[idx + k]
+        end
+        @inbounds begin
+            z[idx] =
+                invscale * (T(2) * work.nt_v[idx] * dot_jv_x - x[idx])
+            for k in 1:(q - 1)
+                z[idx + k] = invscale * (
+                    -T(2) * work.nt_v[idx + k] * dot_jv_x + x[idx + k]
+                )
+            end
+        end
+    end
+    return z
+end
+
 function compute_nt_scaling!(solver::Solver{T}) where {T<:AbstractFloat}
     data = solver.data
     work = solver.work
@@ -190,6 +279,10 @@ function compute_nt_scaling!(solver::Solver{T}) where {T<:AbstractFloat}
         scale = sqrt(safe_div(s_scal, z_scal))
         invscale = safe_div(one(T), scale)
         scale2 = scale * scale
+        work.nt_scale[block] = scale
+        @inbounds for k in 0:(q - 1)
+            work.nt_v[idx + k] = work.zbar[k + 1]
+        end
         shift = 0
         @inbounds for j in 1:q
             for k in 1:j
@@ -239,7 +332,7 @@ function compute_nt_scaling!(solver::Solver{T}) where {T<:AbstractFloat}
         end
     end
 
-    nt_multiply!(work.lambda, work.Wfull, work.z, data, work)
+    nt_multiply_W!(work.lambda, work.z, data, work)
     return nothing
 end
 
@@ -320,10 +413,123 @@ function bisection_search_from!(solver::Solver{T}, u::AbstractVector{T}, Du::Abs
     return al
 end
 
+function bring2cone_strict!(
+    u::AbstractVector{T},
+    l::Int,
+    qdims::AbstractVector{<:Integer},
+    margin::T,
+) where {T<:AbstractFloat}
+    @inbounds for i in 1:l
+        u[i] = max(u[i], margin)
+    end
+    idx = l + 1
+    for q in qdims
+        tail_norm2 = zero(T)
+        @inbounds for k in 1:(q - 1)
+            tail = u[idx + k]
+            tail_norm2 += tail * tail
+        end
+        u[idx] = max(u[idx], sqrt(tail_norm2) + margin)
+        idx += q
+    end
+    return u
+end
+
+@inline function _smallest_positive_root(a::T, b::T, c::T) where {T<:AbstractFloat}
+    # Solve a*α^2 + 2b*α + c = 0. The starting point is strictly
+    # interior, so c > 0 and the first positive root is the cone boundary.
+    scale = max(abs(a), max(abs(b), abs(c)))
+    if scale == zero(T)
+        return T(Inf)
+    end
+    tolerance = T(32) * eps(T) * scale
+    if abs(a) <= tolerance
+        linear = T(2) * b
+        return linear < -tolerance ? -c / linear : T(Inf)
+    end
+    discriminant = muladd(b, b, -a * c)
+    if discriminant < -tolerance * scale
+        return T(Inf)
+    end
+    root_discriminant = sqrt(max(discriminant, zero(T)))
+    q = -(b + copysign(root_discriminant, b))
+    if q == zero(T)
+        root = -b / a
+        return root > zero(T) ? root : T(Inf)
+    end
+    root_1 = q / a
+    root_2 = c / q
+    root = T(Inf)
+    root_1 > zero(T) && (root = root_1)
+    root_2 > zero(T) && (root = min(root, root_2))
+    return root
+end
+
+function _analytical_cone_linesearch(
+    u::AbstractVector{T},
+    Du::AbstractVector{T},
+    Du_offset::Int,
+    l::Int,
+    qdims::AbstractVector{<:Integer},
+    f::T,
+) where {T<:AbstractFloat}
+    step = f
+    @inbounds for i in 1:l
+        direction = Du[Du_offset + i - 1]
+        if direction < zero(T)
+            step = min(step, -f * u[i] / direction)
+        end
+    end
+
+    first = l + 1
+    for qdim in qdims
+        u0 = u[first]
+        d0 = Du[Du_offset + first - 1]
+        a = d0 * d0
+        b = u0 * d0
+        c = u0 * u0
+        @inbounds for k in 1:(qdim - 1)
+            uk = u[first + k]
+            dk = Du[Du_offset + first + k - 1]
+            a -= dk * dk
+            b -= uk * dk
+            c -= uk * uk
+        end
+        boundary = _smallest_positive_root(a, b, c)
+        if isfinite(boundary)
+            head_at_boundary = muladd(boundary, d0, u0)
+            tolerance = T(128) * eps(T) * max(one(T), abs(u0))
+            if !isfinite(head_at_boundary) || head_at_boundary <= -tolerance
+                return nothing
+            end
+            step = min(step, f * boundary)
+        elseif a < zero(T) || b < zero(T)
+            # A direction that eventually leaves the cone must have a
+            # positive boundary. Treat a missing root as numerically suspect.
+            return nothing
+        end
+        first += qdim
+    end
+    return clamp(step, zero(T), one(T))
+end
+
 function linesearch!(solver::Solver{T}, u::AbstractVector{T}, Du::AbstractVector{T}, f::T) where {T<:AbstractFloat}
-    return isempty(solver.data.q) ? exact_linesearch(u, Du, solver.data.l, f) : bisection_search!(solver, u, Du, f)
+    isempty(solver.data.q) && return exact_linesearch(u, Du, solver.data.l, f)
+    step = _analytical_cone_linesearch(u, Du, 1, solver.data.l, solver.data.q, f)
+    return step === nothing ? bisection_search!(solver, u, Du, f) : step
 end
 
 function linesearch_from!(solver::Solver{T}, u::AbstractVector{T}, Du::AbstractVector{T}, Du_offset::Int, f::T) where {T<:AbstractFloat}
-    return isempty(solver.data.q) ? exact_linesearch_from(u, Du, Du_offset, solver.data.l, f) : bisection_search_from!(solver, u, Du, Du_offset, f)
+    isempty(solver.data.q) &&
+        return exact_linesearch_from(u, Du, Du_offset, solver.data.l, f)
+    step = _analytical_cone_linesearch(
+        u,
+        Du,
+        Du_offset,
+        solver.data.l,
+        solver.data.q,
+        f,
+    )
+    return step === nothing ?
+           bisection_search_from!(solver, u, Du, Du_offset, f) : step
 end

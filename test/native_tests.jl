@@ -1,6 +1,8 @@
 module NativeTests
 
 using Test
+using Random
+using LinearAlgebra
 using SparseArrays
 
 import JuliaQOCO
@@ -126,6 +128,45 @@ end
     @test step_from >= bisect_from
 end
 
+@testset "Analytical SOC line search properties" begin
+    rng = MersenneTwister(42)
+    solver = JuliaQOCO.Solver(
+        spzeros(1, 1),
+        [0.0],
+        nothing,
+        nothing,
+        sparse([0.0; 0.0; 0.0;;]),
+        [1.0, 0.0, 0.0],
+        0,
+        [3];
+        settings = quiet_settings(),
+    )
+    for _ in 1:250
+        tail = randn(rng, 2)
+        u = [norm(tail) + 0.1 + rand(rng); tail]
+        direction = randn(rng, 3)
+        step = JuliaQOCO.linesearch!(solver, u, direction, 0.99)
+        trial = u .+ step .* direction
+        @test JuliaQOCO.cone_residual(trial, 0, [3]) <= 1e-10
+
+        lo = 0.0
+        hi = 1.0
+        if JuliaQOCO.cone_residual(u .+ hi .* direction, 0, [3]) >= 0
+            for _ in 1:80
+                mid = (lo + hi) / 2
+                if JuliaQOCO.cone_residual(u .+ mid .* direction, 0, [3]) < 0
+                    lo = mid
+                else
+                    hi = mid
+                end
+            end
+        else
+            lo = 1.0
+        end
+        @test step ≈ 0.99 * lo atol = 5e-11 rtol = 5e-10
+    end
+end
+
 @testset "NT scaling consistency" begin
     P = spzeros(2, 2)
     c = [0.0, 0.0]
@@ -143,6 +184,96 @@ end
     expected = [gram[j, k] for j in 1:q for k in 1:j]
     actual = solver.work.WtW[tri_offset:(tri_offset + length(expected) - 1)]
     @test isapprox(actual, expected; atol = 1e-10, rtol = 1e-10)
+
+    rng = MersenneTwister(7)
+    for _ in 1:100
+        tail_s = 0.2 .* randn(rng, 1)
+        tail_z = 0.2 .* randn(rng, 1)
+        solver.work.s .= [norm(tail_s) + 0.5 + rand(rng); tail_s]
+        solver.work.z .= [norm(tail_z) + 0.5 + rand(rng); tail_z]
+        JuliaQOCO.compute_nt_scaling!(solver)
+        input = randn(rng, 2)
+        dense_W = similar(input)
+        dense_Winv = similar(input)
+        structured_W = similar(input)
+        structured_Winv = similar(input)
+        JuliaQOCO.nt_multiply!(
+            dense_W,
+            solver.work.Wfull,
+            input,
+            solver.data,
+            solver.work,
+        )
+        JuliaQOCO.nt_multiply!(
+            dense_Winv,
+            solver.work.Winvfull,
+            input,
+            solver.data,
+            solver.work,
+        )
+        JuliaQOCO.nt_multiply_W!(
+            structured_W,
+            input,
+            solver.data,
+            solver.work,
+        )
+        JuliaQOCO.nt_multiply_Winv!(
+            structured_Winv,
+            input,
+            solver.data,
+            solver.work,
+        )
+        @test structured_W ≈ dense_W atol = 1e-11 rtol = 1e-11
+        @test structured_Winv ≈ dense_Winv atol = 1e-11 rtol = 1e-11
+    end
+end
+
+@testset "Indexed updates and frozen scaling" begin
+    P = sparse([1, 2], [1, 2], [2.0, 4.0], 2, 2)
+    c = [-2.0, -1.0]
+    A = sparse([1, 1], [1, 2], [1.0, 2.0], 1, 2)
+    b = [1.0]
+    G = sparse([1, 2], [1, 2], [-1.0, -1.0], 2, 2)
+    h = [0.0, 0.0]
+    settings = JuliaQOCO.Settings{Float64}(;
+        verbose = false,
+        ruiz_iters = 4,
+        scaling_mode = :once,
+    )
+    solver = JuliaQOCO.Solver(P, c, A, b, G, h, 2, Int[]; settings)
+    JuliaQOCO.solve!(solver)
+    scaling_before = (
+        copy(solver.scaling.Druiz),
+        copy(solver.scaling.Eruiz),
+        copy(solver.scaling.Fruiz),
+        solver.scaling.k,
+    )
+    JuliaQOCO.update_P_entries!(solver, [1], [3.0])
+    JuliaQOCO.update_A_entries!(solver, [2], [1.5])
+    JuliaQOCO.update_G_entries!(solver, [1], [-0.8])
+    JuliaQOCO.update_c_entries!(solver, [1], [-1.8])
+    JuliaQOCO.update_b_entries!(solver, [1], [1.1])
+    JuliaQOCO.update_h_entries!(solver, [2], [0.1])
+    JuliaQOCO.solve!(solver)
+    @test solver.solution.status == JuliaQOCO.QOCO_SOLVED
+    @test solver.scaling.Druiz == scaling_before[1]
+    @test solver.scaling.Eruiz == scaling_before[2]
+    @test solver.scaling.Fruiz == scaling_before[3]
+    @test solver.scaling.k == scaling_before[4]
+
+    fresh = JuliaQOCO.solve(
+        sparse([1, 2], [1, 2], [3.0, 4.0], 2, 2),
+        [-1.8, -1.0];
+        A = sparse([1, 1], [1, 2], [1.0, 1.5], 1, 2),
+        b = [1.1],
+        G = sparse([1, 2], [1, 2], [-0.8, -1.0], 2, 2),
+        h = [0.0, 0.1],
+        l = 2,
+        q = Int[],
+        settings = settings,
+    )
+    @test solver.solution.x ≈ fresh.solution.x atol = 2e-6 rtol = 2e-6
+    @test solver.solution.obj ≈ fresh.solution.obj atol = 2e-6 rtol = 2e-6
 end
 
 @testset "Warm starts and in-place updates" begin

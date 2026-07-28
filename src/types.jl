@@ -35,14 +35,19 @@ SolveProfile() = SolveProfile(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 
 
 mutable struct ProblemData{T<:AbstractFloat,Ti<:Integer}
     P::SparseMatrixCSC{T,Ti}
+    Pcol::Vector{Ti}
     c::Vector{T}
     A::SparseMatrixCSC{T,Ti}
+    Acol::Vector{Ti}
     At::SparseMatrixCSC{T,Ti}
     AtoAt::Vector{Ti}
+    AfromAt::Vector{Ti}
     b::Vector{T}
     G::SparseMatrixCSC{T,Ti}
+    Gcol::Vector{Ti}
     Gt::SparseMatrixCSC{T,Ti}
     GtoGt::Vector{Ti}
+    GfromGt::Vector{Ti}
     h::Vector{T}
     l::Ti
     q::Vector{Ti}
@@ -79,6 +84,8 @@ mutable struct Workspace{T<:AbstractFloat,Ti<:Integer}
     WtW::Vector{T}
     Wfull::Vector{T}
     Winvfull::Vector{T}
+    nt_v::Vector{T}
+    nt_scale::Vector{T}
     lambda::Vector{T}
     sbar::Vector{T}
     zbar::Vector{T}
@@ -143,10 +150,21 @@ mutable struct Warmstart{T<:AbstractFloat}
     z::Vector{T}
     active::Bool
     manual::Bool
+    scaled::Bool
+    repair::Bool
 end
 
 function Warmstart(::Type{T}, n::Integer, m::Integer, p::Integer) where {T<:AbstractFloat}
-    return Warmstart{T}(zeros(T, n), zeros(T, m), zeros(T, p), zeros(T, m), false, false)
+    return Warmstart{T}(
+        zeros(T, n),
+        zeros(T, m),
+        zeros(T, p),
+        zeros(T, m),
+        false,
+        false,
+        false,
+        false,
+    )
 end
 
 mutable struct Solver{T<:AbstractFloat,Ti<:Integer,F}

@@ -404,4 +404,87 @@ end
     @test JuMP.objective_value(model) ≈ -0.5 atol = 1e-4
 end
 
+@testset "JuMP direct-model repeated SCP updates" begin
+    model = JuMP.direct_model(
+        JuliaQOCO.Optimizer(;
+            verbose = false,
+            reuse_solver = true,
+            scaling_mode = :once,
+            ruiz_iters = 3,
+            warm_start_mode = :primal_dual,
+        ),
+    )
+    @variable(model, 0 <= x[1:3] <= 2, start = 0.25)
+    dynamics = @constraint(model, x[1] + x[2] + x[3] == 1)
+    trust = @constraint(model, [1.5; x[1]; x[2]] in SecondOrderCone())
+    @objective(model, Min, x[1]^2 + 2x[2]^2 + 3x[3]^2 - x[1])
+
+    optimize!(model)
+    @test termination_status(model) == MOI.OPTIMAL
+    solver = MOI.get(backend(model), MOI.RawSolver())
+    factor = solver.linsys.factor
+    rebuild_count = MOI.get(
+        backend(model),
+        MOI.RawOptimizerAttribute("rebuild_count"),
+    )
+
+    optimize!(model)
+    @test MOI.get(backend(model), MOI.RawSolver()) === solver
+    @test solver.linsys.factor === factor
+
+    set_normalized_coefficient(dynamics, x[2], 1.5)
+    set_normalized_coefficient(dynamics, x[2], 2.0)
+    set_normalized_rhs(dynamics, 1.2)
+    set_upper_bound(x[1], 0.9)
+    set_objective_coefficient(model, x[1], -1.5)
+    set_objective_coefficient(model, x[1], x[1], 4.0)
+    set_start_value(x[1], 0.4)
+    soc_index = JuMP.index(trust)
+    MOI.modify(
+        backend(model),
+        soc_index,
+        MOI.VectorConstantChange([1.2, 0.0, 0.0]),
+    )
+    optimize!(model)
+
+    @test termination_status(model) == MOI.OPTIMAL
+    @test MOI.get(backend(model), MOI.RawSolver()) === solver
+    @test solver.linsys.factor === factor
+    @test MOI.get(
+        backend(model),
+        MOI.RawOptimizerAttribute("rebuild_count"),
+    ) == rebuild_count
+    @test MOI.get(backend(model), MOI.SolveTimeSec()) >= 0.0
+    @test isfinite(objective_value(model))
+    @test all(isfinite, value.(x))
+    @test dual(dynamics) isa Float64
+    @test length(dual(trust)) == 3
+
+    fresh = JuMP.direct_model(
+        JuliaQOCO.Optimizer(;
+            verbose = false,
+            scaling_mode = :once,
+            ruiz_iters = 3,
+        ),
+    )
+    upper = [0.9, 2.0, 2.0]
+    @variable(fresh, 0 <= y[i = 1:3] <= upper[i])
+    @constraint(fresh, y[1] + 2y[2] + y[3] == 1.2)
+    @constraint(fresh, [1.2; y[1]; y[2]] in SecondOrderCone())
+    @objective(fresh, Min, 4y[1]^2 + 2y[2]^2 + 3y[3]^2 - 1.5y[1])
+    optimize!(fresh)
+    @test termination_status(fresh) == MOI.OPTIMAL
+    @test objective_value(model) ≈ objective_value(fresh) atol = 2e-5 rtol = 2e-5
+    @test value.(x) ≈ value.(y) atol = 2e-5 rtol = 2e-5
+
+    @variable(model, extra >= 0)
+    set_objective_coefficient(model, extra, 1.0)
+    optimize!(model)
+    @test MOI.get(backend(model), MOI.RawSolver()) !== solver
+    @test MOI.get(
+        backend(model),
+        MOI.RawOptimizerAttribute("rebuild_count"),
+    ) == rebuild_count + 1
+end
+
 end
