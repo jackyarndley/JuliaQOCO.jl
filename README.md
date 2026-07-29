@@ -2,8 +2,7 @@
 
 `JuliaQOCO.jl` is a native Julia primal-dual interior-point solver for convex
 quadratic programs with equality, nonnegative-orthant, and second-order-cone
-constraints. It provides both a native sparse API and a MathOptInterface/JuMP
-optimizer.
+constraints. Its public interface is a MathOptInterface/JuMP optimizer.
 
 The solver uses sparse upper-triangular Hessians, optional Ruiz
 equilibration, structured Nesterov-Todd SOC operations, Mehrotra
@@ -199,23 +198,6 @@ Standard JuMP/MOI result access remains available for primal values, dual
 values, objective value, statuses, barrier iterations, raw status, and solve
 time.
 
-## Native indexed updates
-
-The native API includes full-vector updates and fixed-pattern indexed updates:
-
-```julia
-update_P_entries!(solver, indices, values)
-update_A_entries!(solver, indices, values)
-update_G_entries!(solver, indices, values)
-update_c_entries!(solver, indices, values)
-update_b_entries!(solver, indices, values)
-update_h_entries!(solver, indices, values)
-```
-
-Indexed matrix updates require `scaling_mode = :none` or `:once`. These
-methods update numerical storage only and defer factorization until the IPM
-needs it.
-
 ## Example and benchmarks
 
 Run the complete JuMP SCP-style example:
@@ -224,7 +206,7 @@ Run the complete JuMP SCP-style example:
 julia --project=benchmark examples/scp_jump_reuse.jl
 ```
 
-Run the dedicated JuMP and native benchmarks:
+Run the dedicated JuMP and solver-development benchmarks:
 
 ```julia
 julia --project=benchmark benchmark/jump_repeated_solves.jl
@@ -234,10 +216,9 @@ julia --project=benchmark benchmark/generated_kkt_backend.jl
 ```
 
 The JuMP benchmark separates construction, fresh solves, unchanged cached
-solves, vector updates, full and sparse matrix updates, forced rebuilds,
-structural rebuilds, and the native indexed-update lower bound. It reports
-time, allocations, setup/solve time, iterations, KKT nonzeros, and factor
-nonzeros.
+solves, vector updates, full and sparse matrix updates, forced rebuilds, and
+structural rebuilds. It reports time, allocations, setup/solve time,
+iterations, KKT nonzeros, and factor nonzeros.
 
 The generated-backend benchmark reports first-pattern and already-compiled
 same-pattern setup separately, numeric-refactor, triangular-solve,

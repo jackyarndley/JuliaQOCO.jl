@@ -10,6 +10,14 @@ const MOI = MathOptInterface
 const MOIU = MOI.Utilities
 
 @testset "MOI Wrapper" begin
+    @testset "Public API" begin
+        public_names = names(JuliaQOCO)
+        @test :Optimizer in public_names
+        @test :solve! ∉ public_names
+        @test :solve ∉ public_names
+        @test :Solver ∉ public_names
+    end
+
     @testset "Solver attributes" begin
         opt = JuliaQOCO.Optimizer()
         @test MOI.get(opt, MOI.SolverName()) == "JuliaQOCO"

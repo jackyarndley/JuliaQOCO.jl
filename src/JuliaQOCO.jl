@@ -12,26 +12,7 @@ const QDLDL = InternalQDLDL
 
 const MOIU = MOI.Utilities
 
-export Settings,
-       SolveStatus,
-       Solution,
-       Solver,
-       Optimizer,
-       warm_start!,
-       clear_warmstart!,
-       update_vector_data!,
-       update_matrix_data!,
-       update_P_entries!,
-       update_A_entries!,
-       update_G_entries!,
-       update_c_entries!,
-       update_b_entries!,
-       update_h_entries!,
-       copy_settings,
-       default_settings,
-       active_kkt_backend,
-       solve!,
-       solve
+export Optimizer
 
 include("statuscodes.jl")
 include("settings.jl")
