@@ -9,6 +9,7 @@ mutable struct JuMPSCPCase
     u
     trust
     dynamics
+    trust_cones
     horizon::Int
     nx::Int
     nu::Int
@@ -21,14 +22,12 @@ function build_jump_scp_case(;
     nu::Int = 2,
     direct::Bool = true,
     reuse_solver::Bool = true,
-    kkt_backend::Symbol = :qdldl,
 )
     optimizer = JuliaQOCO.Optimizer(;
         verbose = false,
         reuse_solver,
         scaling_mode = :once,
         warm_start_mode = :primal_dual,
-        kkt_backend,
     )
     model = direct ? JuMP.direct_model(optimizer) :
             JuMP.Model(() -> optimizer)
@@ -54,8 +53,12 @@ function build_jump_scp_case(;
             0.002 * sin(k + i),
         )
     end
+    trust_cones = Vector{JuMP.ConstraintRef}(undef, horizon)
     for k in 1:horizon
-        @constraint(model, [trust[k]; [x[k, i] for i in 1:nx]] in SecondOrderCone())
+        trust_cones[k] = @constraint(
+            model,
+            [trust[k] + 0.0; [x[k, i] + 0.0 for i in 1:nx]] in SecondOrderCone(),
+        )
         @constraint(
             model,
             [1.0; [u[k - 1, j] for j in 1:nu]] in SecondOrderCone(),
@@ -74,11 +77,59 @@ function build_jump_scp_case(;
         u,
         trust,
         dynamics,
+        trust_cones,
         horizon,
         nx,
         nu,
         0,
     )
+end
+
+function update_jump_scp_whole!(case::JuMPSCPCase)
+    case.iteration += 1
+    phase = 0.17 * case.iteration
+    optimizer = backend(case.model)
+    for k in 0:(case.horizon - 1), i in 1:case.nx
+        constraint = case.dynamics[k + 1, i]
+        index = JuMP.index(constraint)
+        old = MOI.get(optimizer, MOI.ConstraintFunction(), index)
+        terms = MOI.ScalarAffineTerm{Float64}[]
+        for term in old.terms
+            coefficient = term.coefficient * (1 + 0.01 * sin(phase + 0.1 * (k + i + term.variable.value)))
+            push!(terms, MOI.ScalarAffineTerm(coefficient, term.variable))
+        end
+        new_function = MOI.ScalarAffineFunction(terms, old.constant + 0.0005 * cos(phase + i))
+        MOI.set(optimizer, MOI.ConstraintFunction(), index, new_function)
+    end
+    index = JuMP.index(case.trust_cones[1])
+    old = MOI.get(optimizer, MOI.ConstraintFunction(), index)
+    old_terms = old isa MOI.VectorOfVariables ?
+                [
+                    MOI.VectorAffineTerm(
+                        output_index,
+                        MOI.ScalarAffineTerm(1.0, variable),
+                    ) for (output_index, variable) in enumerate(old.variables)
+                ] : old.terms
+    old_constants = old isa MOI.VectorOfVariables ?
+                    zeros(Float64, length(old.variables)) : old.constants
+    terms = MOI.VectorAffineTerm{Float64}[]
+    for term in old_terms
+        coefficient = term.scalar_term.coefficient *
+                      (1 + 0.01 * cos(phase + term.scalar_term.variable.value))
+        push!(terms, MOI.VectorAffineTerm(
+            term.output_index,
+            MOI.ScalarAffineTerm(coefficient, term.scalar_term.variable),
+        ))
+    end
+    constants = copy(old_constants)
+    constants[1] = 1.2 + 0.1 * sin(phase)
+    MOI.set(
+        optimizer,
+        MOI.ConstraintFunction(),
+        index,
+        MOI.VectorAffineFunction(terms, constants),
+    )
+    return case
 end
 
 function update_jump_scp!(case::JuMPSCPCase; matrix_fraction::Float64 = 1.0)
