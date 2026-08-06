@@ -7,5 +7,6 @@ using Test
     end
     if "moi" in selected
         include("moi_wrapper_tests.jl")
+        include("moi_test_subset.jl")
     end
 end

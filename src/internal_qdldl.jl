@@ -7,7 +7,6 @@
 module InternalQDLDL
 
 export qdldl, \, solve, solve!, refactor!, update_values!, scale_values!, positive_inertia, regularized_entries
-export generate_factorization, is_generated
 
 using AMD, SparseArrays
 using LinearAlgebra: istriu, triu, Diagonal
@@ -16,8 +15,48 @@ const QDLDL_UNKNOWN = -1;
 const QDLDL_USED   = true;
 const QDLDL_UNUSED = false;
 
+function _get_amd_ordering(A, amd_dense_scale)
+    meta = Amd()
+    meta.control[AMD.AMD_DENSE] *= Float64(amd_dense_scale)
+    return amd(A, meta)
+end
 
-struct QDLDLWorkspace{Tf<:AbstractFloat,Ti<:Integer,TA<:Union{Vector{Ti},Nothing},TS<:Union{Vector{Ti},Nothing}}
+function permute_symmetric(A::SparseMatrixCSC{Tf,Ti}, iperm::AbstractVector{Ti}) where {Tf<:AbstractFloat,Ti<:Integer}
+    size(A, 1) == size(A, 2) || throw(DimensionMismatch("matrix must be square"))
+    length(iperm) == size(A, 1) && isperm(iperm) || throw(ArgumentError("invalid permutation"))
+    rows = Ti[]
+    cols = Ti[]
+    vals = Tf[]
+    @inbounds for column in 1:size(A, 2)
+        for position in A.colptr[column]:(A.colptr[column + 1] - 1)
+            row = A.rowval[position]
+            row <= column || continue
+            new_row, new_col = minmax(iperm[row], iperm[column])
+            push!(rows, new_row)
+            push!(cols, new_col)
+            push!(vals, A.nzval[position])
+        end
+    end
+    P0 = sparse(rows, cols, vals, size(A, 1), size(A, 2))
+    P = SparseMatrixCSC{Tf,Ti}(size(A, 1), size(A, 2), Ti.(P0.colptr), Ti.(P0.rowval), copy(P0.nzval))
+    positions = Dict{Tuple{Ti,Ti},Ti}()
+    @inbounds for column in 1:size(P, 2)
+        for position in P.colptr[column]:(P.colptr[column + 1] - 1)
+            positions[(P.rowval[position], Ti(column))] = Ti(position)
+        end
+    end
+    mapping = Vector{Ti}(undef, nnz(A))
+    @inbounds for column in 1:size(A, 2)
+        for position in A.colptr[column]:(A.colptr[column + 1] - 1)
+            row = A.rowval[position]
+            mapping[position] = positions[minmax(iperm[row], iperm[column])]
+        end
+    end
+    return P, mapping
+end
+
+
+mutable struct QDLDLWorkspace{Tf<:AbstractFloat,Ti<:Integer,TA<:Union{Vector{Ti},Nothing},TS<:Union{Vector{Ti},Nothing}}
 
     #internal workspace data
     etree::Vector{Ti}
@@ -130,7 +169,6 @@ struct QDLDLFactorisation{
     TP<:Union{Nothing,Vector{Ti}},
     TIP<:Union{Nothing,Vector{Ti}},
     TW<:QDLDLWorkspace{Tf,Ti},
-    TG,
 }
 
     #permutation vector (nothing if no permutation)
@@ -145,33 +183,7 @@ struct QDLDLFactorisation{
     workspace::TW
     #is it logical factorisation only?
     logical::Ref{Bool}
-    #zero-sized fixed-pattern kernel descriptor, or nothing
-    generated_pattern::TG
 end
-
-"""
-Compile-time representation of a fixed solver sparsity pattern.
-
-The tuple values are type parameters, so Julia generates numeric
-factorization, triangular-solve, and sparse-product methods per distinct
-pattern. The value is zero-sized and identical patterns reuse the same
-compiled specializations without a mutable global cache.
-"""
-struct GeneratedSparseOps{PCP,PRI,ACP,ARI,GCP,GRI} end
-
-struct GeneratedPattern{
-    AP,
-    AI,
-    LP,
-    LI,
-    ROWPTR,
-    ROWCOLS,
-    ROWVALS,
-    HAS_SIGNS,
-    SPARSE_OPS,
-} end
-
-
 
 
 # Usage :
@@ -255,50 +267,8 @@ function qdldl(A::SparseMatrixCSC{Tf,Ti};
         Dinv,
         workspace,
         Ref{Bool}(logical),
-        nothing,
     )
 
-end
-
-is_generated(F::QDLDLFactorisation) = F.generated_pattern !== nothing
-
-function generate_factorization(
-    F::QDLDLFactorisation,
-    P::SparseMatrixCSC,
-    A::SparseMatrixCSC,
-    G::SparseMatrixCSC,
-)
-    F.logical[] && throw(ArgumentError("cannot generate kernels for a logical factorization"))
-    workspace = F.workspace
-    workspace.pattern_initialized[] ||
-        throw(ArgumentError("the QDLDL numeric pattern has not been initialized"))
-    pattern = GeneratedPattern{
-        Tuple(workspace.triuA.colptr),
-        Tuple(workspace.triuA.rowval),
-        Tuple(workspace.Lp),
-        Tuple(workspace.Li),
-        Tuple(workspace.rowptr),
-        Tuple(workspace.rowcols),
-        Tuple(workspace.rowvals),
-        workspace.Dsigns !== nothing,
-        GeneratedSparseOps{
-            Tuple(P.colptr),
-            Tuple(P.rowval),
-            Tuple(A.colptr),
-            Tuple(A.rowval),
-            Tuple(G.colptr),
-            Tuple(G.rowval),
-        },
-    }()
-    return QDLDLFactorisation(
-        F.perm,
-        F.iperm,
-        F.L,
-        F.Dinv,
-        workspace,
-        F.logical,
-        pattern,
-    )
 end
 
 function positive_inertia(F::QDLDLFactorisation)
@@ -410,39 +380,7 @@ function refactor!(F::QDLDLFactorisation)
 
     F.logical[] = false  #in case not already
 
-    _refactor!(F.generated_pattern, F.workspace, F.logical[])
-    return nothing
-end
-
-@inline function _refactor!(
-    ::Nothing,
-    workspace::QDLDLWorkspace,
-    logical::Bool,
-)
-    factor!(workspace, logical)
-    return nothing
-end
-
-@inline function _refactor!(
-    pattern::GeneratedPattern,
-    workspace::QDLDLWorkspace,
-    ::Bool,
-)
-    positive_inertia = _generated_numeric_factor!(
-        pattern,
-        workspace.triuA.nzval,
-        workspace.Lx,
-        workspace.D,
-        workspace.Dinv,
-        workspace.factor_fwork,
-        workspace.Dsigns,
-        workspace.regularize_eps,
-        workspace.regularize_delta,
-        workspace.regularize_count,
-    )
-    positive_inertia < 0 &&
-        error("Zero entry in D (matrix is not quasidefinite)")
-    workspace.positive_inertia[] = positive_inertia
+    factor!(F.workspace, F.logical[])
     return nothing
 end
 
@@ -535,15 +473,7 @@ function solve!(F::QDLDLFactorisation,b)
     #permute b
     tmp = perm === nothing ? b : permute!(F.workspace.solve_fwork,b,perm)
 
-    _solve_factor!(
-        F.generated_pattern,
-        F.workspace.Ln,
-        F.workspace.Lp,
-        F.workspace.Li,
-        F.workspace.Lx,
-        F.workspace.Dinv,
-        tmp,
-    )
+    QDLDL_solve!(F.workspace.Ln, F.workspace.Lp, F.workspace.Li, F.workspace.Lx, F.workspace.Dinv, tmp)
 
     #inverse permutation
     if perm !== nothing
@@ -552,93 +482,6 @@ function solve!(F::QDLDLFactorisation,b)
 
     return nothing
 end
-
-@inline function _solve_factor!(::Nothing, n, Lp, Li, Lx, Dinv, x)
-    QDLDL_solve!(n, Lp, Li, Lx, Dinv, x)
-    return nothing
-end
-
-@inline function _solve_factor!(
-    pattern::GeneratedPattern,
-    ::Integer,
-    ::AbstractVector,
-    ::AbstractVector,
-    Lx,
-    Dinv,
-    x,
-)
-    _generated_solve_factor!(pattern, Lx, Dinv, x)
-    return nothing
-end
-
-@generated function _generated_solve_factor!(
-    ::GeneratedPattern{
-        AP,
-        AI,
-        LP,
-        LI,
-        ROWPTR,
-        ROWCOLS,
-        ROWVALS,
-        HAS_SIGNS,
-        SPARSE_OPS,
-    },
-    Lx::AbstractVector{T},
-    Dinv::AbstractVector{T},
-    x::AbstractVector{T},
-) where {
-    AP,
-    AI,
-    LP,
-    LI,
-    ROWPTR,
-    ROWCOLS,
-    ROWVALS,
-    HAS_SIGNS,
-    SPARSE_OPS,
-    T,
-}
-    n = length(LP) - 1
-    body = Expr(:block)
-    for row in 1:n
-        xrow = gensym(:xrow)
-        push!(body.args, :($xrow = x[$row]))
-        positions = collect(ROWPTR[row]:(ROWPTR[row + 1] - 1))
-        sort!(positions; by = position -> ROWCOLS[position])
-        for row_position in positions
-            column = ROWCOLS[row_position]
-            value_position = ROWVALS[row_position]
-            push!(
-                body.args,
-                :($xrow = muladd(-Lx[$value_position], x[$column], $xrow)),
-            )
-        end
-        push!(body.args, :(x[$row] = $xrow))
-    end
-    for i in 1:n
-        push!(body.args, :(x[$i] *= Dinv[$i]))
-    end
-    for column in n:-1:1
-        xcolumn = gensym(:xcolumn)
-        push!(body.args, :($xcolumn = x[$column]))
-        for position in LP[column]:(LP[column + 1] - 1)
-            row = LI[position]
-            push!(
-                body.args,
-                :($xcolumn = muladd(-Lx[$position], x[$row], $xcolumn)),
-            )
-        end
-        push!(body.args, :(x[$column] = $xcolumn))
-    end
-    push!(body.args, :(return nothing))
-    return quote
-        @inbounds begin
-            $body
-        end
-    end
-end
-
-
 
 # Compute the elimination tree for a quasidefinite matrix
 # in compressed sparse column form.
@@ -1008,100 +851,6 @@ function QDLDL_numeric_factor!(
     return positiveValuesInD
 end
 
-@generated function _generated_numeric_factor!(
-    ::GeneratedPattern{
-        AP,
-        AI,
-        LP,
-        LI,
-        ROWPTR,
-        ROWCOLS,
-        ROWVALS,
-        HAS_SIGNS,
-        SPARSE_OPS,
-    },
-    Ax::AbstractVector{T},
-    Lx::AbstractVector{T},
-    D::AbstractVector{T},
-    Dinv::AbstractVector{T},
-    yVals::AbstractVector{T},
-    Dsigns,
-    regularize_eps::T,
-    regularize_delta::T,
-    regularize_count,
-) where {
-    AP,
-    AI,
-    LP,
-    LI,
-    ROWPTR,
-    ROWCOLS,
-    ROWVALS,
-    HAS_SIGNS,
-    SPARSE_OPS,
-    T,
-}
-    n = length(AP) - 1
-    body = Expr(:block)
-    push!(body.args, :(regularize_count[1] = 0))
-    push!(body.args, :(positive_values = 0))
-    for k in 1:n
-        Dk = gensym(:Dk)
-        diagonal_position = 0
-        for position in AP[k]:(AP[k + 1] - 1)
-            if AI[position] == k
-                diagonal_position = position
-            else
-                push!(body.args, :(yVals[$(AI[position])] = Ax[$position]))
-            end
-        end
-        diagonal_position == 0 &&
-            error("generated QDLDL pattern is missing diagonal entry $k")
-        push!(body.args, :($Dk = Ax[$diagonal_position]))
-
-        for row_position in ROWPTR[k]:(ROWPTR[k + 1] - 1)
-            column = ROWCOLS[row_position]
-            value_position = ROWVALS[row_position]
-            yvalue = gensym(:yvalue)
-            lvalue = gensym(:lvalue)
-            push!(body.args, :($yvalue = yVals[$column]))
-            for value_index in LP[column]:(value_position - 1)
-                row = LI[value_index]
-                push!(
-                    body.args,
-                    :(yVals[$row] = muladd(-Lx[$value_index], $yvalue, yVals[$row])),
-                )
-            end
-            push!(body.args, :($lvalue = $yvalue * Dinv[$column]))
-            push!(body.args, :(Lx[$value_position] = $lvalue))
-            push!(body.args, :($Dk = muladd(-$yvalue, $lvalue, $Dk)))
-            push!(body.args, :(yVals[$column] = zero(T)))
-        end
-
-        if HAS_SIGNS
-            push!(
-                body.args,
-                quote
-                    if Dsigns[$k] * $Dk < regularize_eps
-                        $Dk = regularize_delta * Dsigns[$k]
-                        regularize_count[1] += 1
-                    end
-                end,
-            )
-        end
-        push!(body.args, :($Dk == zero(T) && return -1))
-        push!(body.args, :(D[$k] = $Dk))
-        push!(body.args, :(positive_values += $Dk > zero(T)))
-        push!(body.args, :(Dinv[$k] = inv($Dk)))
-    end
-    push!(body.args, :(return positive_values))
-    return quote
-        @inbounds begin
-            $body
-        end
-    end
-end
-
 # Solves (L+I)x = b, with x replacing b
 function QDLDL_Lsolve!(n,Lp,Li,Lx,x)
 
@@ -1177,127 +926,6 @@ function inverse_permute!(x, b, iperm)
     return x
 end
 
-
-"Given a sparse symmetric matrix `A` (with only upper triangular entries), return permuted sparse symmetric matrix `P` (only upper triangular) given the inverse permutation vector `iperm`."
-function permute_symmetric(
-    A::SparseMatrixCSC{Tf, Ti},
-    iperm::AbstractVector{Ti},
-    Pr::AbstractVector{Ti} = zeros(Ti, nnz(A)),
-    Pc::AbstractVector{Ti} = zeros(Ti, size(A, 1) + 1),
-    Pv::AbstractVector{Tf} = zeros(Tf, nnz(A))
-) where {Tf <: AbstractFloat, Ti <: Integer}
-
-    # perform a number of argument checks
-    m, n = size(A)
-    m != n && throw(DimensionMismatch("Matrix A must be sparse and square"))
-
-    isperm(iperm) || throw(ArgumentError("pinv must be a permutation"))
-
-    if n != length(iperm)
-        throw(DimensionMismatch("Dimensions of sparse matrix A must equal the length of iperm, $((m,n)) != $(iperm)"))
-    end
-
-    #we will record a mapping of entries from A to PAPt
-    AtoPAPt = zeros(Ti,length(Pv))
-
-    P = _permute_symmetric(A, AtoPAPt, iperm, Pr, Pc, Pv)
-    return P, AtoPAPt
-end
-
-# the main function without extra argument checks
-# following the book: Timothy Davis - Direct Methods for Sparse Linear Systems
-function _permute_symmetric(
-    A::SparseMatrixCSC{Tf, Ti},
-    AtoPAPt::AbstractVector{Ti},
-    iperm::AbstractVector{Ti},
-    Pr::AbstractVector{Ti},
-    Pc::AbstractVector{Ti},
-    Pv::AbstractVector{Tf}
-) where {Tf <: AbstractFloat, Ti <: Integer}
-
-    # 1. count number of entries that each column of P will have
-    n = size(A, 2)
-    num_entries = zeros(Ti, n)
-    Ar = A.rowval
-    Ac = A.colptr
-    Av = A.nzval
-
-    # count the number of upper-triangle entries in columns of P, keeping in mind the row permutation
-    for colA = 1:n
-        colP = iperm[colA]
-        # loop over entries of A in column A...
-        for row_idx = Ac[colA]:Ac[colA+1]-1
-            rowA = Ar[row_idx]
-            rowP = iperm[rowA]
-            # ...and check if entry is upper triangular
-            if rowA <= colA
-                # determine to which column the entry belongs after permutation
-                col_idx = max(rowP, colP)
-                num_entries[col_idx] += one(Ti)
-            end
-        end
-    end
-    # 2. calculate permuted Pc = P.colptr from number of entries
-    Pc[1] = one(Ti)
-    @inbounds for k = 1:n
-        Pc[k + 1] = Pc[k] + num_entries[k]
-
-        # reuse this vector memory to keep track of free entries in rowval
-        num_entries[k] = Pc[k]
-    end
-    # use alias
-    row_starts = num_entries
-
-    # 3. permute the row entries and position of corresponding nzval
-    for colA = 1:n
-        colP = iperm[colA]
-        # loop over rows of A and determine where each row entry of A should be stored
-        for rowA_idx = Ac[colA]:Ac[colA+1]-1
-            rowA = Ar[rowA_idx]
-            # check if upper triangular
-            if rowA <= colA
-                rowP = iperm[rowA]
-                # determine column to store the entry
-                col_idx = max(colP, rowP)
-
-                # find next free location in rowval (this results in unordered columns in the rowval)
-                rowP_idx = row_starts[col_idx]
-
-                # store rowval and nzval
-                Pr[rowP_idx] = min(colP, rowP)
-                Pv[rowP_idx] = Av[rowA_idx]
-
-                #record this into the mapping vector
-                AtoPAPt[rowA_idx] = rowP_idx
-
-                # increment next free location
-                row_starts[col_idx] += 1
-            end
-        end
-    end
-    nz_new = Pc[end] - 1
-    P = SparseMatrixCSC{Tf, Ti}(n, n, Pc, Pr[1:nz_new], Pv[1:nz_new])
-
-    return P
-end
-
-function _get_amd_ordering(A,amd_dense_scale)
-
-    # PJG: For interested readers - setting amd_dense_scale to 1.5 seems to work better
-    # for KKT systems in QP problems, but this ad hoc method can surely be improved
-
-    # computes a permutation for A using AMD default parameters explicit cast of the scaling 
-    # to Float64 here allows the scale parameter to be passed as some other float type for 
-    # consistency with the main API.
-
-    meta = Amd()
-    meta.control[AMD.AMD_DENSE] *= Float64(amd_dense_scale)   
-    p = amd(A,meta)
-    return p
-
-
-
-end
 
 end #end module
 

@@ -91,7 +91,7 @@ function _clear_queue!(queue::DirtyQueue)
 end
 
 mutable struct MOIAssemblyCache{T<:AbstractFloat}
-    solver::Solver{T,Int,F} where {F}
+    solver::CoreSolver{T,Int}
     constraint_info::Dict{ConstraintKey,ConstraintInfo{T}}
     coefficient_targets::Dict{CoefficientKey,MatrixTarget{T}}
     quadratic_targets::Dict{QuadraticKey,MatrixTarget{T}}
@@ -124,6 +124,7 @@ mutable struct Optimizer{T<:AbstractFloat} <: MOI.AbstractOptimizer
     starts_dirty::Bool
     structure_generation::UInt64
     rebuild_count::Int
+    last_rebuild_reason::Symbol
     termination_status::MOI.TerminationStatusCode
     primal_status::MOI.ResultStatusCode
     dual_status::MOI.ResultStatusCode
@@ -143,6 +144,7 @@ function Optimizer{T}(; kwargs...) where {T<:AbstractFloat}
         false,
         UInt64(0),
         0,
+        :initial,
         MOI.OPTIMIZE_NOT_CALLED,
         MOI.NO_SOLUTION,
         MOI.NO_SOLUTION,
@@ -176,9 +178,10 @@ function _invalidate_results!(opt::Optimizer)
     return nothing
 end
 
-function _mark_structure_dirty!(opt::Optimizer)
+function _mark_structure_dirty!(opt::Optimizer, reason::Symbol = :model_structure)
     opt.structure_dirty = true
     opt.structure_generation += UInt64(1)
+    opt.last_rebuild_reason = reason
     _invalidate_results!(opt)
     return nothing
 end
@@ -195,6 +198,7 @@ function _reset_optimizer!(opt::Optimizer{T}) where {T}
     opt.starts_dirty = false
     opt.structure_generation += UInt64(1)
     opt.rebuild_count = 0
+    opt.last_rebuild_reason = :empty
     _invalidate_results!(opt)
     return nothing
 end
@@ -291,7 +295,6 @@ MOI.supports(::Optimizer, ::MOI.Silent) = true
 MOI.supports(::Optimizer, ::MOI.RawOptimizerAttribute) = true
 MOI.supports(::Optimizer, ::MOI.SolverVersion) = true
 MOI.supports(::Optimizer, ::MOI.BarrierIterations) = true
-MOI.supports(::Optimizer, ::MOI.DualObjectiveValue) = true
 MOI.supports(::Optimizer, ::MOI.VariablePrimalStart) = true
 MOI.supports(opt::Optimizer, attr::MOI.AbstractVariableAttribute) =
     MOI.supports(opt.model, attr)
@@ -329,9 +332,6 @@ function MOI.set(opt::Optimizer, attr::MOI.RawOptimizerAttribute, value)
                 :ruiz_iters,
                 :kkt_static_reg,
                 :kkt_dynamic_reg,
-                :kkt_backend,
-                :generated_max_dimension,
-                :generated_max_factor_nnz,
             )
                 _mark_structure_dirty!(opt)
             else
@@ -350,8 +350,17 @@ function MOI.get(opt::Optimizer, attr::MOI.RawOptimizerAttribute)
         return opt.rebuild_count
     elseif attr.name == "last_commit_time_sec"
         return opt.cache === nothing ? 0.0 : opt.cache.last_commit_time_sec
-    elseif attr.name == "active_kkt_backend"
-        return opt.cache === nothing ? :none : active_kkt_backend(opt.cache.solver)
+    elseif attr.name == "commit_count"
+        return opt.cache === nothing ? 0 : opt.cache.commit_count
+    elseif attr.name == "symbolic_rebuild_count"
+        return opt.rebuild_count
+    elseif attr.name == "last_rebuild_reason"
+        return opt.last_rebuild_reason
+    elseif attr.name == "regularized_entries"
+        return opt.cache === nothing || opt.cache.solver.linsys.factor === nothing ?
+               0 : QDLDL.regularized_entries(opt.cache.solver.linsys.factor)
+    elseif attr.name == "dynamic_regularizations"
+        return opt.cache === nothing ? 0 : opt.cache.solver.solution.profile.dynamic_regularizations
     end
     name = Symbol(attr.name)
     if name in fieldnames(typeof(opt.settings))
@@ -374,9 +383,6 @@ MOI.get(opt::Optimizer, ::MOI.ResultCount) =
     opt.primal_status == MOI.NO_SOLUTION ? 0 : 1
 MOI.get(opt::Optimizer, ::MOI.SolveTimeSec) =
     opt.cache === nothing ? 0.0 : opt.cache.solver.solution.solve_time_sec
-MOI.get(opt::Optimizer, attr::MOI.DualObjectiveValue) =
-    MOI.get(opt, MOI.ObjectiveValue(attr.result_index))
-
 MOI.get(opt::Optimizer, attr::MOI.AbstractModelAttribute) = MOI.get(opt.model, attr)
 MOI.get(opt::Optimizer, attr::MOI.AbstractVariableAttribute, vi::MOI.VariableIndex) =
     MOI.get(opt.model, attr, vi)
@@ -384,14 +390,59 @@ MOI.get(opt::Optimizer, attr::MOI.AbstractConstraintAttribute, ci::MOI.Constrain
     MOI.get(opt.model, attr, ci)
 
 function MOI.set(opt::Optimizer, attr::MOI.ObjectiveSense, value)
+    old_value = MOI.get(opt.model, attr)
     MOI.set(opt.model, attr, value)
-    _mark_structure_dirty!(opt)
+    if value == MOI.FEASIBILITY_SENSE || old_value == MOI.FEASIBILITY_SENSE ||
+       opt.cache === nothing || opt.structure_dirty
+        _mark_structure_dirty!(opt, :objective_pattern)
+    else
+        old_sign = opt.cache.objective_sign
+        new_sign = value == MOI.MAX_SENSE ? -one(eltype(opt.cache.raw_P)) : one(eltype(opt.cache.raw_P))
+        if old_value != value && old_sign != new_sign && any(!iszero, opt.cache.raw_P)
+            _mark_structure_dirty!(opt, :objective_convexity)
+        elseif old_value != value && old_sign != new_sign
+            _flip_objective_sign!(opt, new_sign / old_sign)
+        else
+            _mark_numeric_dirty!(opt)
+        end
+    end
     return nothing
 end
 
 function MOI.set(opt::Optimizer, attr::MOI.ObjectiveFunction{F}, value::F) where {F}
+    _validate_objective_function!(opt, value)
+    old_type = MOI.get(opt.model, MOI.ObjectiveFunctionType())
+    old_value = old_type === nothing ? nothing : MOI.get(opt.model, MOI.ObjectiveFunction{old_type}())
     MOI.set(opt.model, attr, value)
-    _mark_structure_dirty!(opt)
+    if MOI.get(opt.model, MOI.ObjectiveSense()) == MOI.FEASIBILITY_SENSE ||
+       opt.cache === nothing || opt.structure_dirty || old_value === nothing
+        _mark_structure_dirty!(opt, :objective_pattern)
+    elseif !_same_objective_pattern(opt.cache, old_value, value)
+        _mark_structure_dirty!(opt, :objective_pattern)
+    else
+        _queue_objective_function!(opt, value)
+    end
+    return nothing
+end
+
+function _validate_objective_function!(opt::Optimizer{T}, f) where {T<:AbstractFloat}
+    MOI.get(opt.model, MOI.ObjectiveSense()) == MOI.FEASIBILITY_SENSE && return nothing
+    f isa MOI.ScalarQuadraticFunction || return nothing
+    variables = MOI.get(opt.model, MOI.ListOfVariableIndices())
+    n = isempty(variables) ? 0 : maximum(vi.value for vi in variables)
+    n <= 512 || return nothing
+    P = zeros(T, n, n)
+    sign = MOI.get(opt.model, MOI.ObjectiveSense()) == MOI.MAX_SENSE ? -one(T) : one(T)
+    for term in f.quadratic_terms
+        i = term.variable_1.value
+        j = term.variable_2.value
+        P[i, j] += sign * term.coefficient
+        i != j && (P[j, i] += sign * term.coefficient)
+    end
+    isempty(f.quadratic_terms) && return nothing
+    scale = max(one(T), opnorm(P, Inf))
+    minimum(eigvals(Symmetric(P))) >= -sqrt(eps(T)) * scale ||
+        throw(ArgumentError("quadratic objective matrix must be positive semidefinite after objective-sense conversion"))
     return nothing
 end
 
@@ -423,8 +474,15 @@ function MOI.set(
     ci::MOI.ConstraintIndex,
     value,
 )
+    old_value = MOI.get(opt.model, attr, ci)
     MOI.set(opt.model, attr, ci, value)
-    _mark_structure_dirty!(opt)
+    if opt.cache === nothing || opt.structure_dirty
+        _mark_structure_dirty!(opt, :constraint_pattern)
+    elseif !_same_constraint_pattern(opt.cache, ci, old_value, value)
+        _mark_structure_dirty!(opt, :constraint_pattern)
+    else
+        _queue_constraint_function!(opt, ci, old_value, value)
+    end
     return nothing
 end
 
@@ -435,6 +493,174 @@ function MOI.set(
     value,
 )
     MOI.set(opt.model, attr, ci, value)
+    return nothing
+end
+
+@inline function _same_scalar_term_support(old_terms, new_terms)
+    length(old_terms) == length(new_terms) || return false
+    for old_term in old_terms
+        matches = 0
+        for new_term in new_terms
+            matches += old_term.variable.value == new_term.variable.value
+        end
+        matches == 1 || return false
+    end
+    return true
+end
+
+@inline function _same_vector_term_support(old_terms, new_terms)
+    length(old_terms) == length(new_terms) || return false
+    for old_term in old_terms
+        old_variable = old_term.scalar_term.variable.value
+        matches = 0
+        for new_term in new_terms
+            matches +=
+                old_term.output_index == new_term.output_index &&
+                old_variable == new_term.scalar_term.variable.value
+        end
+        matches == 1 || return false
+    end
+    return true
+end
+
+@inline function _same_quadratic_term_support(old_terms, new_terms)
+    length(old_terms) == length(new_terms) || return false
+    for old_term in old_terms
+        old_i, old_j = minmax(old_term.variable_1.value, old_term.variable_2.value)
+        matches = 0
+        for new_term in new_terms
+            new_i, new_j = minmax(new_term.variable_1.value, new_term.variable_2.value)
+            matches += old_i == new_i && old_j == new_j
+        end
+        matches == 1 || return false
+    end
+    return true
+end
+
+function _same_constraint_pattern(
+    cache::MOIAssemblyCache,
+    ci::MOI.ConstraintIndex,
+    old,
+    new,
+)
+    typeof(old) === typeof(new) || return false
+    if old isa MOI.VariableIndex
+        return old.value == new.value
+    elseif old isa MOI.VectorOfVariables
+        return old.variables == new.variables
+    elseif old isa MOI.ScalarAffineFunction
+        _same_scalar_term_support(old.terms, new.terms) || return false
+        key = _constraint_key(ci)
+        for term in old.terms
+            haskey(cache.coefficient_targets, CoefficientKey(key, 1, term.variable.value)) ||
+                return false
+        end
+        return true
+    elseif old isa MOI.VectorAffineFunction
+        length(old.constants) == length(new.constants) || return false
+        _same_vector_term_support(old.terms, new.terms) || return false
+        key = _constraint_key(ci)
+        for term in old.terms
+            haskey(
+                cache.coefficient_targets,
+                CoefficientKey(key, term.output_index, term.scalar_term.variable.value),
+            ) || return false
+        end
+        return true
+    end
+    return false
+end
+
+function _queue_constraint_function!(
+    opt::Optimizer{T},
+    ci::MOI.ConstraintIndex,
+    old,
+    new,
+) where {T<:AbstractFloat}
+    cache = opt.cache
+    key = _constraint_key(ci)
+    if old isa MOI.ScalarAffineFunction
+        for term in old.terms
+            _queue_target!(cache, cache.coefficient_targets[CoefficientKey(key, 1, term.variable.value)], zero(T))
+        end
+        for term in new.terms
+            _queue_target!(cache, cache.coefficient_targets[CoefficientKey(key, 1, term.variable.value)], term.coefficient)
+        end
+    elseif old isa MOI.VectorAffineFunction
+        for term in old.terms
+            target = cache.coefficient_targets[CoefficientKey(key, term.output_index, term.scalar_term.variable.value)]
+            _queue_target!(cache, target, zero(T))
+        end
+        for term in new.terms
+            target = cache.coefficient_targets[CoefficientKey(key, term.output_index, term.scalar_term.variable.value)]
+            _queue_target!(cache, target, term.scalar_term.coefficient)
+        end
+    end
+    _queue_constraint_constants!(opt, ci, new)
+    _mark_numeric_dirty!(opt)
+    return nothing
+end
+
+function _same_objective_pattern(cache::MOIAssemblyCache, old, new)
+    typeof(old) === typeof(new) || return false
+    if old isa MOI.VariableIndex
+        return old.value == new.value
+    elseif old isa MOI.ScalarAffineFunction
+        return _same_scalar_term_support(old.terms, new.terms)
+    elseif old isa MOI.ScalarQuadraticFunction
+        _same_scalar_term_support(old.affine_terms, new.affine_terms) || return false
+        _same_quadratic_term_support(old.quadratic_terms, new.quadratic_terms) || return false
+        for term in old.quadratic_terms
+            key = QuadraticKey(minmax(term.variable_1.value, term.variable_2.value)...)
+            haskey(cache.quadratic_targets, key) || return false
+        end
+        return true
+    end
+    return false
+end
+
+function _queue_objective_function!(opt::Optimizer{T}, f) where {T<:AbstractFloat}
+    cache = opt.cache
+    fill!(cache.c_dirty.values, zero(T))
+    _clear_queue!(cache.c_dirty)
+    for index in eachindex(cache.c_dirty.values)
+        _queue!(cache.c_dirty, index, zero(T))
+    end
+    if f isa MOI.VariableIndex
+        _queue!(cache.c_dirty, cache.variable_to_column[f.value], cache.objective_sign)
+        cache.objective_constant = zero(T)
+    elseif f isa MOI.ScalarAffineFunction
+        for term in f.terms
+            _queue!(cache.c_dirty, cache.variable_to_column[term.variable.value], cache.objective_sign * term.coefficient)
+        end
+        cache.objective_constant = f.constant
+    elseif f isa MOI.ScalarQuadraticFunction
+        for term in f.affine_terms
+            _queue!(cache.c_dirty, cache.variable_to_column[term.variable.value], cache.objective_sign * term.coefficient)
+        end
+        for key in keys(cache.quadratic_targets)
+            _queue_target!(cache, cache.quadratic_targets[key], zero(T))
+        end
+        for term in f.quadratic_terms
+            key = QuadraticKey(minmax(term.variable_1.value, term.variable_2.value)...)
+            _queue_target!(cache, cache.quadratic_targets[key], cache.objective_sign * term.coefficient)
+        end
+        cache.objective_constant = f.constant
+    end
+    _mark_numeric_dirty!(opt)
+    return nothing
+end
+
+function _flip_objective_sign!(opt::Optimizer{T}, ratio::T) where {T<:AbstractFloat}
+    cache = opt.cache
+    cache.objective_sign *= ratio
+    for target in values(cache.quadratic_targets)
+        _queue_target!(cache, target, cache.raw_P[target.raw_position_1] * ratio / target.multiplier_1)
+    end
+    for index in eachindex(cache.c_dirty.values)
+        _queue!(cache.c_dirty, index, cache.c_dirty.values[index] * ratio)
+    end
+    _mark_numeric_dirty!(opt)
     return nothing
 end
 
@@ -479,6 +705,38 @@ _constraint_value(
     variable_to_column::Vector{Int},
 ) = x[variable_to_column[f.value]]
 
+function _sparse_with_pattern(
+    rows::Vector{Int},
+    cols::Vector{Int},
+    values::Vector{T},
+    nrows::Int,
+    ncols::Int,
+) where {T<:AbstractFloat}
+    length(rows) == length(cols) == length(values) || throw(DimensionMismatch("sparse triplets have inconsistent lengths"))
+    coordinates = Set{Tuple{Int,Int}}()
+    for k in eachindex(rows)
+        1 <= rows[k] <= nrows || throw(ArgumentError("sparse row is out of bounds"))
+        1 <= cols[k] <= ncols || throw(ArgumentError("sparse column is out of bounds"))
+        isfinite(values[k]) || throw(ArgumentError("sparse data must be finite"))
+        before = length(coordinates)
+        push!(coordinates, (rows[k], cols[k]))
+        length(coordinates) == before + 1 || throw(ArgumentError("duplicate sparse term"))
+    end
+    order = sortperm(eachindex(rows); by = k -> (cols[k], rows[k]))
+    colptr = zeros(Int, ncols + 1)
+    rowval = Vector{Int}(undef, length(order))
+    nzval = Vector{T}(undef, length(order))
+    @inbounds for (position, k) in enumerate(order)
+        rowval[position] = rows[k]
+        nzval[position] = values[k]
+        colptr[cols[k] + 1] += 1
+    end
+    @inbounds for col in 1:ncols
+        colptr[col + 1] += colptr[col]
+    end
+    return SparseMatrixCSC(nrows, ncols, colptr .+ 1, rowval, nzval)
+end
+
 function _constraint_value(x::AbstractVector{T}, f::MOI.ScalarAffineFunction{T}) where {T<:AbstractFloat}
     y = f.constant
     @inbounds for term in f.terms
@@ -511,6 +769,8 @@ function _objective_data(
     constant = zero(T)
     pending = Dict{QuadraticKey,PendingTarget{T}}()
     sense = MOI.get(model, MOI.ObjectiveSense())
+    sense == MOI.FEASIBILITY_SENSE &&
+        return spzeros(T, n, n), c, zero(T), one(T), pending
     sign = sense == MOI.MAX_SENSE ? -one(T) : one(T)
     F = MOI.get(model, MOI.ObjectiveFunctionType())
     if F == MOI.VariableIndex
@@ -547,7 +807,7 @@ function _objective_data(
             )
         end
     end
-    return sparse(rows, cols, vals, n, n), c, constant, sign, pending
+    return _sparse_with_pattern(rows, cols, vals, n, n), c, constant, sign, pending
 end
 
 @inline function _register_target!(
@@ -907,8 +1167,8 @@ function _constraint_data(
         )
     end
 
-    A = sparse(Arows, Acols, Avals, eq_offset, n)
-    G = sparse(Grows, Gcols, Gvals, cone_offset, n)
+    A = _sparse_with_pattern(Arows, Acols, Avals, eq_offset, n)
+    G = _sparse_with_pattern(Grows, Gcols, Gvals, cone_offset, n)
     return A, b, G, h, l, q, info, pending
 end
 
@@ -966,7 +1226,7 @@ function _build_cache!(opt::Optimizer{T}) where {T<:AbstractFloat}
         _objective_data(opt.model, variable_to_column, n)
     A, b, G, h, l, q, info, pending_coefficients =
         _constraint_data(opt, variable_to_column, n)
-    solver = Solver(P, c, A, b, G, h, l, q; settings = copy_settings(opt.settings))
+    solver = CoreSolver(P, c, A, b, G, h, l, q; settings = copy_settings(opt.settings))
     raw_positions = (
         _coordinate_positions(P),
         _coordinate_positions(A),
@@ -1069,7 +1329,7 @@ function _queue_constraint_coefficient!(
     key = CoefficientKey(_constraint_key(ci), output_index, variable.value)
     target = get(cache.coefficient_targets, key, nothing)
     if target === nothing
-        _mark_structure_dirty!(opt)
+        _mark_structure_dirty!(opt, :bound_pattern)
     else
         _queue_target!(cache, target, coefficient)
         _mark_numeric_dirty!(opt)
@@ -1164,11 +1424,19 @@ function _queue_constraint_constants!(
     opt::Optimizer{T},
     ci::MOI.ConstraintIndex{F,S},
 ) where {T,F,S}
+    f = MOI.get(opt.model, MOI.ConstraintFunction(), ci)
+    return _queue_constraint_constants!(opt, ci, f)
+end
+
+function _queue_constraint_constants!(
+    opt::Optimizer{T},
+    ci::MOI.ConstraintIndex{F,S},
+    f,
+) where {T,F,S}
     cache = opt.cache
     (cache === nothing || opt.structure_dirty) && return nothing
     info = cache.constraint_info[_constraint_key(ci)]
     info.length == 0 && return nothing
-    f = MOI.get(opt.model, MOI.ConstraintFunction(), ci)
     set = MOI.get(opt.model, MOI.ConstraintSet(), ci)
     if f isa MOI.VectorAffineFunction{T}
         @inbounds for i in eachindex(f.constants)
@@ -1177,7 +1445,11 @@ function _queue_constraint_constants!(
             _queue!(queue, info.offset + i - 1, value)
         end
     else
-        constant = f isa MOI.VariableIndex ? zero(T) : f.constant
+        constant = if f isa MOI.VariableIndex || f isa MOI.VectorOfVariables
+            zero(T)
+        else
+            f.constant
+        end
         if set isa MOI.EqualTo{T}
             _queue!(cache.b_dirty, info.offset, set.value - constant)
         elseif set isa MOI.GreaterThan{T}
@@ -1234,12 +1506,13 @@ function MOI.set(
     if _finite_pattern(old_set) == _finite_pattern(set)
         _queue_constraint_constants!(opt, ci)
     else
-        _mark_structure_dirty!(opt)
+        _mark_structure_dirty!(opt, :bound_pattern)
     end
     return nothing
 end
 
 _finite_pattern(::MOI.AbstractSet) = UInt8(0)
+_finite_pattern(set::MOI.AbstractVectorSet) = (typeof(set), MOI.dimension(set))
 _finite_pattern(set::MOI.EqualTo) = UInt8(1)
 _finite_pattern(set::MOI.GreaterThan) = isfinite(set.lower) ? UInt8(2) : UInt8(3)
 _finite_pattern(set::MOI.LessThan) = isfinite(set.upper) ? UInt8(4) : UInt8(5)
@@ -1338,7 +1611,7 @@ function _apply_variable_starts!(opt::Optimizer{T}) where {T}
     return nothing
 end
 
-function _copy_runtime_settings!(solver::Solver, settings::Settings)
+function _copy_runtime_settings!(solver::CoreSolver, settings::Settings)
     solver.settings = copy_settings(settings)
     return nothing
 end
@@ -1368,23 +1641,32 @@ function _set_result_status!(opt::Optimizer)
 end
 
 function MOI.optimize!(opt::Optimizer)
-    if opt.cache === nothing || opt.structure_dirty || !opt.settings.reuse_solver
-        _build_cache!(opt)
-    else
-        if opt.settings_dirty
-            _copy_runtime_settings!(opt.cache.solver, opt.settings)
-            opt.settings_dirty = false
+    try
+        if opt.cache === nothing || opt.structure_dirty || !opt.settings.reuse_solver
+            _build_cache!(opt)
+        else
+            if opt.settings_dirty
+                _copy_runtime_settings!(opt.cache.solver, opt.settings)
+                opt.settings_dirty = false
+            end
+            _has_pending_updates(opt.cache) && _commit_updates!(opt.cache)
         end
-        _has_pending_updates(opt.cache) && _commit_updates!(opt.cache)
+        opt.starts_dirty && _apply_variable_starts!(opt)
+        _solve!(opt.cache.solver)
+        _set_result_status!(opt)
+    catch error
+        opt.termination_status = error isa ArgumentError ? MOI.INVALID_MODEL : MOI.OTHER_ERROR
+        opt.primal_status = MOI.NO_SOLUTION
+        opt.dual_status = MOI.NO_SOLUTION
+        opt.raw_status_string = sprint(showerror, error)
     end
-    opt.starts_dirty && _apply_variable_starts!(opt)
-    solve!(opt.cache.solver)
-    _set_result_status!(opt)
     return nothing
 end
 
 function MOI.get(opt::Optimizer, attr::MOI.ObjectiveValue)
     MOI.check_result_index_bounds(opt, attr)
+    MOI.get(opt.model, MOI.ObjectiveSense()) == MOI.FEASIBILITY_SENSE &&
+        return zero(eltype(opt.cache.solver.solution.x))
     cache = opt.cache
     return cache.objective_sign * cache.solver.solution.obj +
            cache.objective_constant

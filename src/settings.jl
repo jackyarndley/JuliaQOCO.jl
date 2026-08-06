@@ -1,7 +1,7 @@
 Base.@kwdef mutable struct Settings{T<:AbstractFloat}
     max_iters::Int = 200
     bisect_iters::Int = 5
-    ruiz_iters::Int = 0
+    ruiz_iters::Int = 3
     iter_ref_iters::Int = 1
     iter_ref_tol::T = sqrt(eps(T))
     kkt_static_reg::T = T(1e-8)
@@ -13,11 +13,8 @@ Base.@kwdef mutable struct Settings{T<:AbstractFloat}
     verbose::Bool = true
     profile::Bool = false
     reuse_solver::Bool = true
-    scaling_mode::Symbol = :recompute
+    scaling_mode::Symbol = :once
     warm_start_mode::Symbol = :primal_dual
-    kkt_backend::Symbol = :qdldl
-    generated_max_dimension::Int = 384
-    generated_max_factor_nnz::Int = 3_000
     output::IO = stdout
 end
 
@@ -39,9 +36,6 @@ function copy_settings(settings::Settings{T}) where {T<:AbstractFloat}
         reuse_solver = settings.reuse_solver,
         scaling_mode = settings.scaling_mode,
         warm_start_mode = settings.warm_start_mode,
-        kkt_backend = settings.kkt_backend,
-        generated_max_dimension = settings.generated_max_dimension,
-        generated_max_factor_nnz = settings.generated_max_factor_nnz,
         output = settings.output,
     )
 end
@@ -62,11 +56,5 @@ function validate_settings(settings::Settings)
         throw(ArgumentError("scaling_mode must be :none, :once, or :recompute"))
     settings.warm_start_mode in (:none, :primal, :primal_dual, :adaptive) ||
         throw(ArgumentError("warm_start_mode must be :none, :primal, :primal_dual, or :adaptive"))
-    settings.kkt_backend in (:qdldl, :generated, :auto) ||
-        throw(ArgumentError("kkt_backend must be :qdldl, :generated, or :auto"))
-    settings.generated_max_dimension > 0 ||
-        throw(ArgumentError("generated_max_dimension must be positive"))
-    settings.generated_max_factor_nnz > 0 ||
-        throw(ArgumentError("generated_max_factor_nnz must be positive"))
     return settings
 end

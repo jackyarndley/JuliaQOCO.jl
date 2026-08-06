@@ -20,6 +20,7 @@ function reset_solve_profile!(profile::SolveProfile)
     profile.linsys_solves = 0
     profile.linsys_refinements = 0
     profile.nt_refactors = 0
+    profile.dynamic_regularizations = 0
     return profile
 end
 

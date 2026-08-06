@@ -1,4 +1,4 @@
-function _refresh_static_kkt!(solver::Solver{T}) where {T<:AbstractFloat}
+function _refresh_static_kkt!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     solver.linsys.factor === nothing && return solver
     _fill_static_values!(solver.linsys.static_values, solver.data)
     QDLDL.update_values_internal!(solver.linsys.factor, solver.linsys.static2kkt, solver.linsys.static_values)
@@ -25,7 +25,7 @@ function _copy_start_component!(
 end
 
 function warm_start!(
-    solver::Solver{T};
+    solver::CoreSolver{T};
     x = nothing,
     s = nothing,
     y = nothing,
@@ -46,7 +46,7 @@ function warm_start!(
     return solver
 end
 
-function clear_warmstart!(solver::Solver)
+function clear_warmstart!(solver::CoreSolver)
     solver.warmstart.active = false
     solver.warmstart.manual = false
     solver.warmstart.scaled = false
@@ -54,7 +54,7 @@ function clear_warmstart!(solver::Solver)
     return solver
 end
 
-function _automatic_warmstart_is_valid!(solver::Solver{T}) where {T<:AbstractFloat}
+function _automatic_warmstart_is_valid!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     data = solver.data
     work = solver.work
     mul_upper_symmetric!(work.xbuff, data.P, work.x)
@@ -93,7 +93,7 @@ function _automatic_warmstart_is_valid!(solver::Solver{T}) where {T<:AbstractFlo
     return isfinite(residual) && residual <= T(100) * data_scale
 end
 
-function _apply_warmstart!(solver::Solver{T}) where {T<:AbstractFloat}
+function _apply_warmstart!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     ws = solver.warmstart
     ws.active || return false
     has_nan(ws.x) && return false
@@ -157,7 +157,7 @@ function _apply_warmstart!(solver::Solver{T}) where {T<:AbstractFloat}
     return true
 end
 
-function _cache_solution_as_warmstart!(solver::Solver{T}) where {T<:AbstractFloat}
+function _cache_solution_as_warmstart!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     solver.solution.status == QOCO_NUMERICAL_ERROR && return solver
     has_nan(solver.solution.x) && return solver
     has_nan(solver.solution.s) && return solver
@@ -183,7 +183,7 @@ function _cache_solution_as_warmstart!(solver::Solver{T}) where {T<:AbstractFloa
 end
 
 function update_vector_data!(
-    solver::Solver{T};
+    solver::CoreSolver{T};
     c::Union{Nothing,AbstractVector{T}} = nothing,
     b::Union{Nothing,AbstractVector{T}} = nothing,
     h::Union{Nothing,AbstractVector{T}} = nothing,
@@ -214,7 +214,7 @@ function update_vector_data!(
     return solver
 end
 
-function _unscale_problem_data!(solver::Solver{T}) where {T<:AbstractFloat}
+function _unscale_problem_data!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     data = solver.data
     scaling = solver.scaling
 
@@ -244,7 +244,7 @@ function _unscale_problem_data!(solver::Solver{T}) where {T<:AbstractFloat}
 end
 
 function update_matrix_data!(
-    solver::Solver{T};
+    solver::CoreSolver{T};
     Px::Union{Nothing,AbstractVector{T}} = nothing,
     Ax::Union{Nothing,AbstractVector{T}} = nothing,
     Gx::Union{Nothing,AbstractVector{T}} = nothing,
@@ -304,7 +304,7 @@ function update_matrix_data!(
 end
 
 function _copy_scaled_P_values!(
-    solver::Solver{T},
+    solver::CoreSolver{T},
     values::AbstractVector{T},
 ) where {T<:AbstractFloat}
     data = solver.data
@@ -333,7 +333,7 @@ function _copy_scaled_P_values!(
 end
 
 function _copy_scaled_A_values!(
-    solver::Solver{T},
+    solver::CoreSolver{T},
     values::AbstractVector{T},
 ) where {T<:AbstractFloat}
     data = solver.data
@@ -351,7 +351,7 @@ function _copy_scaled_A_values!(
 end
 
 function _copy_scaled_G_values!(
-    solver::Solver{T},
+    solver::CoreSolver{T},
     values::AbstractVector{T},
 ) where {T<:AbstractFloat}
     data = solver.data
@@ -368,7 +368,7 @@ function _copy_scaled_G_values!(
     return data.G
 end
 
-@inline function _invalidate_solution!(solver::Solver)
+@inline function _invalidate_solution!(solver::CoreSolver)
     solver.solution.status = QOCO_UNSOLVED
     solver.solution.status_detail = ""
     solver.data.stats_dirty = true
@@ -377,7 +377,7 @@ end
 end
 
 @inline function _update_static_value!(
-    solver::Solver{T,Ti},
+    solver::CoreSolver{T,Ti},
     static_position::Integer,
     value::T,
 ) where {T<:AbstractFloat,Ti<:Integer}
@@ -389,7 +389,7 @@ end
 end
 
 function update_c_entries!(
-    solver::Solver{T},
+    solver::CoreSolver{T},
     indices::AbstractVector{<:Integer},
     values::AbstractVector{T},
 ) where {T<:AbstractFloat}
@@ -404,7 +404,7 @@ function update_c_entries!(
 end
 
 function update_b_entries!(
-    solver::Solver{T},
+    solver::CoreSolver{T},
     indices::AbstractVector{<:Integer},
     values::AbstractVector{T},
 ) where {T<:AbstractFloat}
@@ -418,7 +418,7 @@ function update_b_entries!(
 end
 
 function update_h_entries!(
-    solver::Solver{T},
+    solver::CoreSolver{T},
     indices::AbstractVector{<:Integer},
     values::AbstractVector{T},
 ) where {T<:AbstractFloat}
@@ -432,7 +432,7 @@ function update_h_entries!(
 end
 
 function update_P_entries!(
-    solver::Solver{T},
+    solver::CoreSolver{T},
     indices::AbstractVector{<:Integer},
     values::AbstractVector{T},
 ) where {T<:AbstractFloat}
@@ -455,7 +455,7 @@ function update_P_entries!(
 end
 
 function update_A_entries!(
-    solver::Solver{T},
+    solver::CoreSolver{T},
     indices::AbstractVector{<:Integer},
     values::AbstractVector{T},
 ) where {T<:AbstractFloat}
@@ -479,7 +479,7 @@ function update_A_entries!(
 end
 
 function update_G_entries!(
-    solver::Solver{T},
+    solver::CoreSolver{T},
     indices::AbstractVector{<:Integer},
     values::AbstractVector{T},
 ) where {T<:AbstractFloat}

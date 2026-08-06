@@ -33,12 +33,6 @@ function structural_rebuild(horizon::Int, nx::Int, nu::Int)
     )
 end
 
-function native_lower_bound!(solver::JuliaQOCO.Solver, index::Int, value::Float64)
-    JuliaQOCO.update_c_entries!(solver, [index], [value])
-    JuliaQOCO.solve!(solver)
-    return nothing
-end
-
 function print_trial(label::AbstractString, trial)
     estimate = median(trial)
     println(
@@ -98,6 +92,13 @@ function run_jump_benchmarks(;
         optimize!($(full_case.model))
     end samples = samples evals = 1
 
+    whole_case = build_jump_scp_case(; horizon, nx, nu)
+    optimize!(whole_case.model)
+    whole_trial = @benchmark begin
+        update_jump_scp_whole!($whole_case)
+        optimize!($(whole_case.model))
+    end samples = samples evals = 1
+
     sparse_case = build_jump_scp_case(; horizon, nx, nu)
     optimize!(sparse_case.model)
     sparse_trial = @benchmark begin
@@ -117,10 +118,6 @@ function run_jump_benchmarks(;
     structural_trial = @benchmark structural_rebuild($horizon, $nx, $nu) samples =
         min(samples, 5) evals = 1
 
-    native_solver = MOI.get(backend(full_case.model), MOI.RawSolver())
-    native_trial = @benchmark native_lower_bound!($native_solver, 1, -0.011) samples =
-        samples evals = 1
-
     println("JuliaQOCO JuMP repeated-SCP benchmark")
     println("horizon=$horizon nx=$nx nu=$nu samples=$samples")
     print_trial("jump_construction", construction_trial)
@@ -129,13 +126,14 @@ function run_jump_benchmarks(;
     print_trial("cached_nochange_optimize", nochange_trial)
     print_trial("cached_vector_updates_and_solve", vector_trial)
     print_trial("cached_full_matrix_updates_and_solve", full_trial)
+    print_trial("cached_whole_function_updates_and_solve", whole_trial)
     print_trial("cached_sparse_matrix_updates_and_solve", sparse_trial)
     print_trial("forced_native_rebuild_nochange", forced_rebuild_trial)
     print_trial("structural_change_and_rebuild", structural_trial)
-    print_trial("native_indexed_update_and_solve", native_trial)
 
     solver = MOI.get(backend(full_case.model), MOI.RawSolver())
     factor = solver.linsys.factor
+    whole_solver = MOI.get(backend(whole_case.model), MOI.RawSolver())
     println(
         "native_setup_time_sec=$(solver.solution.setup_time_sec) " *
         "native_solve_time_sec=$(solver.solution.solve_time_sec) " *
@@ -150,6 +148,16 @@ function run_jump_benchmarks(;
                 MOI.RawOptimizerAttribute("last_commit_time_sec"),
             ),
         ),
+    )
+    println(
+        "whole_function_rebuild_count=" *
+        string(
+            MOI.get(
+                backend(whole_case.model),
+                MOI.RawOptimizerAttribute("rebuild_count"),
+            ),
+        ) *
+        " solver_reused=$(whole_solver.solution.iters > 0)",
     )
     return nothing
 end
