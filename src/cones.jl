@@ -93,58 +93,6 @@ function bring2cone!(u::AbstractVector{T}, l::Int, qdims::AbstractVector{<:Integ
     return u
 end
 
-function set_Wfull_identity!(work::Workspace{T}, data::ProblemData{T}) where {T<:AbstractFloat}
-    fill!(work.Wfull, zero(T))
-    @inbounds for i in 1:data.l
-        work.Wfull[i] = one(T)
-    end
-    for (block, q) in enumerate(data.q)
-        offset = work.Wfull_offsets[block]
-        @inbounds for j in 0:(q - 1)
-            work.Wfull[offset + j * q + j] = one(T)
-        end
-    end
-    return work.Wfull
-end
-
-function nt_multiply!(z::AbstractVector{T}, Wfull::AbstractVector{T}, x::AbstractVector{T}, data::ProblemData{T}, work::Workspace{T,Ti}) where {T<:AbstractFloat,Ti<:Integer}
-    @inbounds for i in 1:data.l
-        z[i] = Wfull[i] * x[i]
-    end
-    for (block, q) in enumerate(data.q)
-        idx = work.soc_offsets[block]
-        offset = work.Wfull_offsets[block]
-        @inbounds for j in 0:(q - 1)
-            acc = zero(T)
-            coloff = offset + j * q
-            for k in 0:(q - 1)
-                acc += Wfull[coloff + k] * x[idx + k]
-            end
-            z[idx + j] = acc
-        end
-    end
-    return z
-end
-
-function nt_multiply_from!(z::AbstractVector{T}, Wfull::AbstractVector{T}, x::AbstractVector{T}, xoffset::Int, data::ProblemData{T}, work::Workspace{T,Ti}) where {T<:AbstractFloat,Ti<:Integer}
-    @inbounds for i in 1:data.l
-        z[i] = Wfull[i] * x[xoffset + i - 1]
-    end
-    for (block, q) in enumerate(data.q)
-        idx = work.soc_offsets[block]
-        offset = work.Wfull_offsets[block]
-        @inbounds for j in 0:(q - 1)
-            acc = zero(T)
-            coloff = offset + j * q
-            for k in 0:(q - 1)
-                acc += Wfull[coloff + k] * x[xoffset + idx + k - 1]
-            end
-            z[idx + j] = acc
-        end
-    end
-    return z
-end
-
 function nt_multiply_W!(
     z::AbstractVector{T},
     x::AbstractVector{T},
@@ -152,7 +100,7 @@ function nt_multiply_W!(
     work::Workspace{T,Ti},
 ) where {T<:AbstractFloat,Ti<:Integer}
     @inbounds for i in 1:data.l
-        z[i] = work.Wfull[i] * x[i]
+        z[i] = sqrt(max(work.WtW[i], zero(T))) * x[i]
     end
     for (block, q) in enumerate(data.q)
         idx = work.soc_offsets[block]
@@ -180,7 +128,7 @@ function nt_multiply_W_from!(
     work::Workspace{T,Ti},
 ) where {T<:AbstractFloat,Ti<:Integer}
     @inbounds for i in 1:data.l
-        z[i] = work.Wfull[i] * x[xoffset + i - 1]
+        z[i] = sqrt(max(work.WtW[i], zero(T))) * x[xoffset + i - 1]
     end
     for (block, q) in enumerate(data.q)
         idx = work.soc_offsets[block]
@@ -212,7 +160,7 @@ function nt_multiply_Winv!(
     work::Workspace{T,Ti},
 ) where {T<:AbstractFloat,Ti<:Integer}
     @inbounds for i in 1:data.l
-        z[i] = work.Winvfull[i] * x[i]
+        z[i] = safe_div(one(T), sqrt(max(work.WtW[i], zero(T)))) * x[i]
     end
     for (block, q) in enumerate(data.q)
         idx = work.soc_offsets[block]
@@ -234,20 +182,17 @@ function nt_multiply_Winv!(
     return z
 end
 
-function compute_nt_scaling!(solver::Solver{T}) where {T<:AbstractFloat}
+function compute_nt_scaling!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     data = solver.data
     work = solver.work
     @inbounds for i in 1:data.l
         w2 = safe_div(work.s[i], work.z[i])
         work.WtW[i] = w2
         w = sqrt(w2)
-        work.Wfull[i] = w
-        work.Winvfull[i] = safe_div(one(T), w)
     end
 
     for (block, q) in enumerate(data.q)
         idx = work.soc_offsets[block]
-        foffset = work.Wfull_offsets[block]
         toffset = work.Wtri_offsets[block]
 
         s_scal = sqrt(max(soc_residual2(work.s, idx, q), zero(T)))
@@ -297,12 +242,6 @@ function compute_nt_scaling!(solver::Solver{T}) where {T<:AbstractFloat}
                 end
                 wval *= scale
                 winvval *= invscale
-                pos1 = foffset + (j - 1) * q + (k - 1)
-                pos2 = foffset + (k - 1) * q + (j - 1)
-                work.Wfull[pos1] = wval
-                work.Wfull[pos2] = wval
-                work.Winvfull[pos1] = winvval
-                work.Winvfull[pos2] = winvval
                 shift += 1
             end
         end
@@ -369,7 +308,7 @@ function exact_linesearch_from(u::AbstractVector{T}, Du::AbstractVector{T}, Du_o
     return -f < minval ? f : -safe_div(f, minval)
 end
 
-function bisection_search!(solver::Solver{T}, u::AbstractVector{T}, Du::AbstractVector{T}, f::T) where {T<:AbstractFloat}
+function bisection_search!(solver::CoreSolver{T}, u::AbstractVector{T}, Du::AbstractVector{T}, f::T) where {T<:AbstractFloat}
     work = solver.work
     data = solver.data
     axpy_to!(work.ubuff1, safe_div(one(T), f), Du, u)
@@ -391,7 +330,7 @@ function bisection_search!(solver::Solver{T}, u::AbstractVector{T}, Du::Abstract
     return al
 end
 
-function bisection_search_from!(solver::Solver{T}, u::AbstractVector{T}, Du::AbstractVector{T}, Du_offset::Int, f::T) where {T<:AbstractFloat}
+function bisection_search_from!(solver::CoreSolver{T}, u::AbstractVector{T}, Du::AbstractVector{T}, Du_offset::Int, f::T) where {T<:AbstractFloat}
     work = solver.work
     data = solver.data
     axpy_to_from!(work.ubuff1, safe_div(one(T), f), Du, Du_offset, u)
@@ -513,13 +452,13 @@ function _analytical_cone_linesearch(
     return clamp(step, zero(T), one(T))
 end
 
-function linesearch!(solver::Solver{T}, u::AbstractVector{T}, Du::AbstractVector{T}, f::T) where {T<:AbstractFloat}
+function linesearch!(solver::CoreSolver{T}, u::AbstractVector{T}, Du::AbstractVector{T}, f::T) where {T<:AbstractFloat}
     isempty(solver.data.q) && return exact_linesearch(u, Du, solver.data.l, f)
     step = _analytical_cone_linesearch(u, Du, 1, solver.data.l, solver.data.q, f)
     return step === nothing ? bisection_search!(solver, u, Du, f) : step
 end
 
-function linesearch_from!(solver::Solver{T}, u::AbstractVector{T}, Du::AbstractVector{T}, Du_offset::Int, f::T) where {T<:AbstractFloat}
+function linesearch_from!(solver::CoreSolver{T}, u::AbstractVector{T}, Du::AbstractVector{T}, Du_offset::Int, f::T) where {T<:AbstractFloat}
     isempty(solver.data.q) &&
         return exact_linesearch_from(u, Du, Du_offset, solver.data.l, f)
     step = _analytical_cone_linesearch(

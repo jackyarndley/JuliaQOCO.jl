@@ -29,9 +29,10 @@ mutable struct SolveProfile
     linsys_solves::Int
     linsys_refinements::Int
     nt_refactors::Int
+    dynamic_regularizations::Int
 end
 
-SolveProfile() = SolveProfile(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0)
+SolveProfile() = SolveProfile(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0, 0)
 
 mutable struct ProblemData{T<:AbstractFloat,Ti<:Integer}
     P::SparseMatrixCSC{T,Ti}
@@ -82,8 +83,6 @@ mutable struct Workspace{T<:AbstractFloat,Ti<:Integer}
     a::T
     sigma::T
     WtW::Vector{T}
-    Wfull::Vector{T}
-    Winvfull::Vector{T}
     nt_v::Vector{T}
     nt_scale::Vector{T}
     lambda::Vector{T}
@@ -101,7 +100,6 @@ mutable struct Workspace{T<:AbstractFloat,Ti<:Integer}
     xyzbuff2::Vector{T}
     kktres::Vector{T}
     soc_offsets::Vector{Ti}
-    Wfull_offsets::Vector{Ti}
     Wtri_offsets::Vector{Ti}
     quad_obj::T
     xPx::T
@@ -127,15 +125,36 @@ mutable struct Solution{T<:AbstractFloat}
     status::SolveStatus
     status_detail::String
     profile::SolveProfile
+    best_x::Vector{T}
+    best_s::Vector{T}
+    best_y::Vector{T}
+    best_z::Vector{T}
+    best_metric::T
+    best_valid::Bool
 end
 
 function Solution(::Type{T}, n::Integer, m::Integer, p::Integer) where {T<:AbstractFloat}
     z = zero(T)
-    return Solution{T}(zeros(T, n), zeros(T, m), zeros(T, p), zeros(T, m), 0, 0.0, 0.0, z, z, z, z, QOCO_UNSOLVED, "", SolveProfile())
+    return Solution{T}(
+        zeros(T, n), zeros(T, m), zeros(T, p), zeros(T, m), 0, 0.0, 0.0,
+        z, z, z, z, QOCO_UNSOLVED, "", SolveProfile(),
+        zeros(T, n), zeros(T, m), zeros(T, p), zeros(T, m), floatmax(T), false,
+    )
 end
 
-mutable struct LinearSystem{T<:AbstractFloat,Ti<:Integer,F}
-    factor::F
+const QDLDLFactor{T,Ti} = Union{
+    Nothing,
+    QDLDL.QDLDLFactorisation{
+        T,
+        Ti,
+        Vector{Ti},
+        Vector{Ti},
+        QDLDL.QDLDLWorkspace{T,Ti,Vector{Ti},Vector{Ti}},
+    },
+}
+
+mutable struct LinearSystem{T<:AbstractFloat,Ti<:Integer}
+    factor::QDLDLFactor{T,Ti}
     nt2kkt::Vector{Ti}
     ntdiag_positions::Vector{Ti}
     nt_values::Vector{T}
@@ -167,12 +186,12 @@ function Warmstart(::Type{T}, n::Integer, m::Integer, p::Integer) where {T<:Abst
     )
 end
 
-mutable struct Solver{T<:AbstractFloat,Ti<:Integer,F}
+mutable struct CoreSolver{T<:AbstractFloat,Ti<:Integer}
     settings::Settings{T}
     data::ProblemData{T,Ti}
     scaling::Scaling{T}
     work::Workspace{T,Ti}
-    linsys::LinearSystem{T,Ti,F}
+    linsys::LinearSystem{T,Ti}
     solution::Solution{T}
     warmstart::Warmstart{T}
 end

@@ -34,10 +34,10 @@ moi_version() = string(pkgversion(MOI))
     settings = Settings{Float64}(; verbose = false)
     P = spzeros(Float64, 1, 1)
     G = sparse([-1.0;;])
-    solver = Solver(P, [1.0], nothing, nothing, G, [-1.0], 1, Int[]; settings = settings)
-    solve!(solver)
+    solver = CoreSolver(P, [1.0], nothing, nothing, G, [-1.0], 1, Int[]; settings = settings)
+    _solve!(solver)
     update_vector_data!(solver; c = [0.5])
-    solve!(solver)
+    _solve!(solver)
 end
 
 end

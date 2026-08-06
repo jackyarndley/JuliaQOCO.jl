@@ -1,27 +1,22 @@
 function _soc_offsets(l::Integer, qdims::AbstractVector{Ti}) where {Ti<:Integer}
     soc_offsets = Vector{Ti}(undef, length(qdims))
-    Wfull_offsets = Vector{Ti}(undef, length(qdims))
     Wtri_offsets = Vector{Ti}(undef, length(qdims))
     soff = Ti(l + 1)
-    foff = Ti(l + 1)
     toff = Ti(l + 1)
     @inbounds for i in eachindex(qdims)
         q = qdims[i]
         soc_offsets[i] = soff
-        Wfull_offsets[i] = foff
         Wtri_offsets[i] = toff
         soff += q
-        foff += q * q
         toff += q * (q + 1) ÷ 2
     end
-    return soc_offsets, Wfull_offsets, Wtri_offsets
+    return soc_offsets, Wtri_offsets
 end
 
 function _workspace(data::ProblemData{T,Ti}) where {T<:AbstractFloat,Ti<:Integer}
     Wnnz = kkt_nt_nnz(data.l, data.q)
-    Wfullnnz = kkt_nt_full_nnz(data.l, data.q)
     maxq = isempty(data.q) ? 0 : maximum(data.q)
-    soc_offsets, Wfull_offsets, Wtri_offsets = _soc_offsets(data.l, data.q)
+    soc_offsets, Wtri_offsets = _soc_offsets(data.l, data.q)
     return Workspace{T,Ti}(
         zeros(T, data.n),
         zeros(T, data.m),
@@ -31,8 +26,6 @@ function _workspace(data::ProblemData{T,Ti}) where {T<:AbstractFloat,Ti<:Integer
         one(T),
         zero(T),
         zeros(T, Wnnz),
-        zeros(T, Wfullnnz),
-        zeros(T, Wfullnnz),
         zeros(T, data.m),
         ones(T, length(data.q)),
         zeros(T, data.m),
@@ -50,7 +43,6 @@ function _workspace(data::ProblemData{T,Ti}) where {T<:AbstractFloat,Ti<:Integer
         zeros(T, data.n + data.p + data.m),
         zeros(T, data.n + data.p + data.m),
         soc_offsets,
-        Wfull_offsets,
         Wtri_offsets,
         zero(T),
         zero(T),
@@ -79,8 +71,18 @@ function _problem_data(
     G0 = G === nothing ? spzeros(T, 0, n) : copy(G)
     b0 = b === nothing ? zeros(T, 0) : collect(b)
     h0 = h === nothing ? zeros(T, 0) : collect(h)
-    P0 = P === nothing ? spzeros(T, n, n) : (istriu(P) ? copy(P) : SparseMatrixCSC(triu(P)))
+    P0 = P === nothing ? spzeros(T, n, n) : begin
+        istriu(P) || throw(ArgumentError("P must use an upper-triangular CSC convention"))
+        copy(P)
+    end
     qv = Ti.(collect(q))
+
+    if nnz(P0) > 0 && size(P0, 1) <= 512
+        dense_P = Matrix(Symmetric(P0))
+        scale_P = max(one(T), opnorm(dense_P, Inf))
+        minimum(eigvals(Symmetric(dense_P))) >= -sqrt(eps(T)) * scale_P ||
+            throw(ArgumentError("quadratic objective matrix must be positive semidefinite"))
+    end
 
     At0, AtoAt = create_transposed_matrix_with_map(A0)
     Gt0, GtoGt = create_transposed_matrix_with_map(G0)
@@ -122,7 +124,7 @@ function _problem_data(
     return data, scaling
 end
 
-function _refresh_scaling_stats!(solver::Solver)
+function _refresh_scaling_stats!(solver::CoreSolver)
     data = solver.data
     if data.stats_dirty
         data.stats = compute_scaling_statistics(data)
@@ -152,7 +154,7 @@ end
 
 function _linsys(data::ProblemData{T,Ti}, settings::Settings{T}, work::Workspace{T,Ti}) where {T<:AbstractFloat,Ti<:Integer}
     if data.n + data.p + data.m == 0
-        return LinearSystem{T,Ti,Nothing}(nothing, Ti[], Ti[], zeros(T, length(work.WtW)), Ti[], T[])
+        return LinearSystem{T,Ti}(nothing, Ti[], Ti[], zeros(T, length(work.WtW)), Ti[], T[])
     end
     K, nt2kkt, ntdiag_positions, P2kkt, At2kkt, Gt2kkt = construct_kkt(data, settings, work)
     signs = vcat(ones(Int, data.n), -ones(Int, data.p + data.m))
@@ -162,24 +164,6 @@ function _linsys(data::ProblemData{T,Ti}, settings::Settings{T}, work::Workspace
         regularize_eps = settings.kkt_dynamic_reg,
         regularize_delta = settings.kkt_dynamic_reg,
     )
-    use_generated =
-        settings.kkt_backend == :generated ||
-        (
-            settings.kkt_backend == :auto &&
-            factor.workspace.Ln <= settings.generated_max_dimension &&
-            nnz(factor.L) <= settings.generated_max_factor_nnz
-        )
-    if use_generated
-        factor = QDLDL.generate_factorization(
-            factor,
-            data.P,
-            data.A,
-            data.G,
-        )
-        # Charge pattern generation and JIT compilation to setup, as QOCOGEN
-        # reports generation/compilation separately from repeated solves.
-        QDLDL.refactor!(factor)
-    end
     static2kkt = Vector{Ti}(undef, length(P2kkt) + length(At2kkt) + length(Gt2kkt))
     pos = 1
     copyto!(view(static2kkt, pos:(pos + length(P2kkt) - 1)), P2kkt)
@@ -191,7 +175,7 @@ function _linsys(data::ProblemData{T,Ti}, settings::Settings{T}, work::Workspace
     static2kkt = QDLDL.map_indices(factor, static2kkt)
     static_values = zeros(T, length(static2kkt))
     _fill_static_values!(static_values, data)
-    return LinearSystem{T,Ti,typeof(factor)}(
+    return LinearSystem{T,Ti}(
         factor,
         nt2kkt,
         ntdiag_positions,
@@ -201,7 +185,7 @@ function _linsys(data::ProblemData{T,Ti}, settings::Settings{T}, work::Workspace
     )
 end
 
-function Solver(
+function CoreSolver(
     P::Union{Nothing,SparseMatrixCSC{T,Ti}},
     c::AbstractVector{T},
     A::Union{Nothing,SparseMatrixCSC{T,Ti}},
@@ -229,10 +213,10 @@ function Solver(
     sol.profile.workspace_time_sec = workspace_time_sec
     sol.profile.linsys_time_sec = linsys_time_sec
     warmstart = Warmstart(T, data.n, data.m, data.p)
-    return Solver{T,Ti,typeof(linsys.factor)}(copy_settings(settings), data, scaling, work, linsys, sol, warmstart)
+    return CoreSolver{T,Ti}(copy_settings(settings), data, scaling, work, linsys, sol, warmstart)
 end
 
-function _print_header(solver::Solver{T}) where {T<:AbstractFloat}
+function _print_header(solver::CoreSolver{T}) where {T<:AbstractFloat}
     data = solver.data
     settings = solver.settings
     stats = _refresh_scaling_stats!(solver)
@@ -256,8 +240,7 @@ function _print_header(solver::Solver{T}) where {T<:AbstractFloat}
     @printf(io, "|     Constraint range     [%.0e, %.0e]               |\n", stats.constraint_range_min, stats.constraint_range_max)
     @printf(io, "|     RHS range            [%.0e, %.0e]               |\n", stats.rhs_range_min, stats.rhs_range_max)
     @printf(io, "| Solver Settings:                                      |\n")
-    algebra = active_kkt_backend(solver) == :generated ?
-              "JuliaQOCO.GeneratedQDLDL" : "JuliaQOCO.QDLDL"
+    algebra = "cached QDLDL"
     @printf(io, "|     algebra: %-27s              |\n", algebra)
     @printf(io, "|     max_iters: %-3d abstol: %3.2e reltol: %3.2e  |\n", settings.max_iters, settings.abstol, settings.reltol)
     @printf(io, "|     abstol_inacc: %3.2e reltol_inacc: %3.2e     |\n", settings.abstol_inacc, settings.reltol_inacc)
@@ -273,7 +256,7 @@ function _print_header(solver::Solver{T}) where {T<:AbstractFloat}
     return nothing
 end
 
-function _log_iter(solver::Solver{T}) where {T<:AbstractFloat}
+function _log_iter(solver::CoreSolver{T}) where {T<:AbstractFloat}
     io = solver.settings.output
     @printf(
         io,
@@ -290,7 +273,7 @@ function _log_iter(solver::Solver{T}) where {T<:AbstractFloat}
     return nothing
 end
 
-function _print_footer(solver::Solver{T}) where {T<:AbstractFloat}
+function _print_footer(solver::CoreSolver{T}) where {T<:AbstractFloat}
     sol = solver.solution
     io = solver.settings.output
     @printf(io, "\n")
@@ -313,17 +296,60 @@ function _print_footer(solver::Solver{T}) where {T<:AbstractFloat}
         @printf(io, "predictor time:        %.2e sec\n", profile.predictor_time_sec)
         @printf(io, "linsys solve/refine:   %.2e / %.2e sec\n", profile.linsys_solve_time_sec, profile.linsys_refine_time_sec)
         @printf(io, "linsys solves/refacs:  %d / %d\n", profile.linsys_solves, profile.nt_refactors)
+        @printf(io, "dynamic regularizations: %d\n", profile.dynamic_regularizations)
     end
     @printf(io, "\n")
     return nothing
 end
 
-function _solve_fast_loop!(solver::Solver{T}, t0::UInt64) where {T<:AbstractFloat}
+function _reset_best_iterate!(solution::Solution{T}) where {T<:AbstractFloat}
+    solution.best_metric = floatmax(T)
+    solution.best_valid = false
+    return solution
+end
+
+function _record_best_iterate!(solver::CoreSolver{T}) where {T<:AbstractFloat}
+    solution = solver.solution
+    metric = max(solution.pres, max(solution.dres, abs(solution.gap))) /
+             max(solver.settings.abstol_inacc, eps(T))
+    isfinite(metric) || return solution
+    if !solution.best_valid || metric < solution.best_metric
+        copyto!(solution.best_x, solver.work.x)
+        copyto!(solution.best_s, solver.work.s)
+        copyto!(solution.best_y, solver.work.y)
+        copyto!(solution.best_z, solver.work.z)
+        solution.best_metric = metric
+        solution.best_valid = true
+    end
+    return solution
+end
+
+function _restore_best_iterate!(solver::CoreSolver)
+    solver.solution.best_valid || return false
+    copyto!(solver.work.x, solver.solution.best_x)
+    copyto!(solver.work.s, solver.solution.best_s)
+    copyto!(solver.work.y, solver.solution.best_y)
+    copyto!(solver.work.z, solver.solution.best_z)
+    return true
+end
+
+function _reset_dynamic_regularization!(solver::CoreSolver{T}) where {T<:AbstractFloat}
+    factor = solver.linsys.factor
+    factor === nothing && return nothing
+    factor.workspace.regularize_eps = solver.settings.kkt_dynamic_reg
+    factor.workspace.regularize_delta = solver.settings.kkt_dynamic_reg
+    return nothing
+end
+
+function _solve_fast_loop!(solver::CoreSolver{T}, t0::UInt64) where {T<:AbstractFloat}
     for iter in 1:solver.settings.max_iters
         compute_kkt_residual!(solver)
         compute_objective!(solver)
         compute_mu!(solver)
-        if check_stopping!(solver)
+        stopped = check_stopping!(solver)
+        _record_best_iterate!(solver)
+        if stopped
+            solver.solution.status == QOCO_NUMERICAL_ERROR && _restore_best_iterate!(solver)
             solver.solution.solve_time_sec = elapsed_time_sec(t0)
             solver.solution.iters = iter - 1
             unscaled_solution!(solver.solution, solver.data, solver.scaling, solver.work)
@@ -342,8 +368,9 @@ function _solve_fast_loop!(solver::Solver{T}, t0::UInt64) where {T<:AbstractFloa
         end
     end
 
-    solver.solution.status = QOCO_MAX_ITER
-    solver.solution.status_detail = "reached iteration limit"
+    _restore_best_iterate!(solver)
+    solver.solution.status = solver.solution.best_valid && solver.solution.best_metric <= one(T) ? QOCO_SOLVED_INACCURATE : QOCO_MAX_ITER
+    solver.solution.status_detail = solver.solution.status == QOCO_SOLVED_INACCURATE ? "best iterate met inaccurate tolerances" : "reached iteration limit"
     solver.solution.solve_time_sec = elapsed_time_sec(t0)
     unscaled_solution!(solver.solution, solver.data, solver.scaling, solver.work)
     _cache_solution_as_warmstart!(solver)
@@ -353,13 +380,7 @@ function _solve_fast_loop!(solver::Solver{T}, t0::UInt64) where {T<:AbstractFloa
     return solver
 end
 
-function active_kkt_backend(solver::Solver)
-    factor = solver.linsys.factor
-    factor === nothing && return :none
-    return QDLDL.is_generated(factor) ? :generated : :qdldl
-end
-
-function _solve_profiled_loop!(solver::Solver{T}, t0::UInt64) where {T<:AbstractFloat}
+function _solve_profiled_loop!(solver::CoreSolver{T}, t0::UInt64) where {T<:AbstractFloat}
     for iter in 1:solver.settings.max_iters
         tphase = time_ns()
         compute_kkt_residual!(solver)
@@ -371,7 +392,10 @@ function _solve_profiled_loop!(solver::Solver{T}, t0::UInt64) where {T<:Abstract
         compute_mu!(solver)
         solver.solution.profile.mu_time_sec += elapsed_time_sec(tphase)
         tphase = time_ns()
-        if check_stopping!(solver)
+        stopped = check_stopping!(solver)
+        _record_best_iterate!(solver)
+        if stopped
+            solver.solution.status == QOCO_NUMERICAL_ERROR && _restore_best_iterate!(solver)
             solver.solution.profile.stopping_time_sec += elapsed_time_sec(tphase)
             solver.solution.solve_time_sec = elapsed_time_sec(t0)
             solver.solution.iters = iter - 1
@@ -393,8 +417,9 @@ function _solve_profiled_loop!(solver::Solver{T}, t0::UInt64) where {T<:Abstract
         solver.solution.iters = iter
         solver.settings.verbose && _log_iter(solver)
     end
-    solver.solution.status = QOCO_MAX_ITER
-    solver.solution.status_detail = "reached iteration limit"
+    _restore_best_iterate!(solver)
+    solver.solution.status = solver.solution.best_valid && solver.solution.best_metric <= one(T) ? QOCO_SOLVED_INACCURATE : QOCO_MAX_ITER
+    solver.solution.status_detail = solver.solution.status == QOCO_SOLVED_INACCURATE ? "best iterate met inaccurate tolerances" : "reached iteration limit"
     solver.solution.solve_time_sec = elapsed_time_sec(t0)
     unscaled_solution!(solver.solution, solver.data, solver.scaling, solver.work)
     _cache_solution_as_warmstart!(solver)
@@ -402,12 +427,14 @@ function _solve_profiled_loop!(solver::Solver{T}, t0::UInt64) where {T<:Abstract
     return solver
 end
 
-function solve!(solver::Solver{T}) where {T<:AbstractFloat}
+function _solve!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     validate_settings(solver.settings)
     solver.solution.status = QOCO_UNSOLVED
     solver.solution.status_detail = ""
     solver.solution.iters = 0
     reset_solve_profile!(solver.solution.profile)
+    _reset_best_iterate!(solver.solution)
+    _reset_dynamic_regularization!(solver)
     t0 = time_ns()
     solver.settings.verbose && _print_header(solver)
     if solver.data.n + solver.data.p + solver.data.m == 0
@@ -422,44 +449,26 @@ function solve!(solver::Solver{T}) where {T<:AbstractFloat}
         solver.settings.verbose && _print_footer(solver)
         return solver
     end
-    if solver.settings.profile
-        tphase = time_ns()
+    try
+        if solver.settings.profile
+            tphase = time_ns()
+            initialize_ipm!(solver)
+            solver.solution.profile.initialize_time_sec += elapsed_time_sec(tphase)
+            return _solve_profiled_loop!(solver, t0)
+        end
         initialize_ipm!(solver)
-        solver.solution.profile.initialize_time_sec += elapsed_time_sec(tphase)
-        return _solve_profiled_loop!(solver, t0)
+        return _solve_fast_loop!(solver, t0)
+    catch error
+        error isa InterruptException && rethrow()
+        _restore_best_iterate!(solver)
+        solver.solution.status = QOCO_NUMERICAL_ERROR
+        solver.solution.status_detail = sprint(showerror, error)
+        solver.solution.solve_time_sec = elapsed_time_sec(t0)
+        unscaled_solution!(solver.solution, solver.data, solver.scaling, solver.work)
+        _cache_solution_as_warmstart!(solver)
+        solver.settings.verbose && _print_footer(solver)
+        return solver
     end
-    initialize_ipm!(solver)
-    return _solve_fast_loop!(solver, t0)
 end
 
-function solve(
-    P::Union{Nothing,SparseMatrixCSC{T,Ti}},
-    c::AbstractVector{T},
-    A::Union{Nothing,SparseMatrixCSC{T,Ti}},
-    b::Union{Nothing,AbstractVector{T}},
-    G::Union{Nothing,SparseMatrixCSC{T,Ti}},
-    h::Union{Nothing,AbstractVector{T}},
-    l::Integer,
-    q::AbstractVector{<:Integer};
-    settings::Settings{T} = default_settings(T),
-) where {T<:AbstractFloat,Ti<:Integer}
-    solver = Solver(P, c, A, b, G, h, l, q; settings = settings)
-    solve!(solver)
-    return solver
-end
-
-function solve(
-    P::Union{Nothing,SparseMatrixCSC{T,Int}},
-    c::AbstractVector{T};
-    A::Union{Nothing,SparseMatrixCSC{T,Int}} = nothing,
-    b::Union{Nothing,AbstractVector{T}} = nothing,
-    G::Union{Nothing,SparseMatrixCSC{T,Int}} = nothing,
-    h::Union{Nothing,AbstractVector{T}} = nothing,
-    l::Integer = 0,
-    q::AbstractVector{<:Integer} = Int[],
-    settings::Settings{T} = default_settings(T),
-) where {T<:AbstractFloat}
-    return solve(P, c, A, b, G, h, l, q; settings = settings)
-end
-
-Base.summary(io::IO, solver::Solver) = print(io, "JuliaQOCO solver ($(solver.data.n) vars, $(solver.data.p) eq, $(solver.data.m) cone rows)")
+Base.summary(io::IO, solver::CoreSolver) = print(io, "JuliaQOCO solver ($(solver.data.n) vars, $(solver.data.p) eq, $(solver.data.m) cone rows)")

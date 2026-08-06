@@ -6,14 +6,6 @@ function kkt_nt_nnz(l::Integer, qdims::AbstractVector{<:Integer})
     return total
 end
 
-function kkt_nt_full_nnz(l::Integer, qdims::AbstractVector{<:Integer})
-    total = l
-    for q in qdims
-        total += q * q
-    end
-    return total
-end
-
 function construct_kkt(data::ProblemData{T,Ti}, settings::Settings{T}, work::Workspace{T,Ti}) where {T<:AbstractFloat,Ti<:Integer}
     n = Int(data.n)
     p = Int(data.p)
@@ -109,24 +101,17 @@ function construct_kkt(data::ProblemData{T,Ti}, settings::Settings{T}, work::Wor
     return K, nt2kkt, ntdiag_positions, P2kkt, At2kkt, Gt2kkt
 end
 
-function set_identity_scalings!(solver::Solver{T}) where {T<:AbstractFloat}
+function set_identity_scalings!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     data = solver.data
     work = solver.work
     fill!(work.WtW, zero(T))
-    set_Wfull_identity!(work, data)
-    fill!(work.Winvfull, zero(T))
     @inbounds for i in 1:Int(data.l)
         work.WtW[i] = one(T)
-        work.Winvfull[i] = one(T)
     end
     for (block, q) in enumerate(data.q)
         toffset = work.Wtri_offsets[block]
-        foffset = work.Wfull_offsets[block]
         @inbounds for j in 1:q
             work.WtW[toffset + (j * (j - 1)) ÷ 2 + j - 1] = one(T)
-            for k in 1:q
-                work.Winvfull[foffset + (j - 1) * q + k - 1] = ifelse(j == k, one(T), zero(T))
-            end
         end
         idx = work.soc_offsets[block]
         work.nt_scale[block] = one(T)
@@ -138,7 +123,7 @@ function set_identity_scalings!(solver::Solver{T}) where {T<:AbstractFloat}
     return nothing
 end
 
-function update_nt_block!(solver::Solver{T}) where {T<:AbstractFloat}
+function update_nt_block!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     work = solver.work
     linsys = solver.linsys
     @inbounds for i in eachindex(work.WtW, linsys.nt_values)
@@ -148,31 +133,33 @@ function update_nt_block!(solver::Solver{T}) where {T<:AbstractFloat}
         linsys.nt_values[pos] -= solver.settings.kkt_static_reg
     end
     QDLDL.update_values_internal!(linsys.factor, linsys.nt2kkt, linsys.nt_values)
-    QDLDL.refactor!(linsys.factor)
+    factor = linsys.factor
+    for attempt in 1:4
+        try
+            QDLDL.refactor!(factor)
+            break
+        catch error
+            attempt == 4 && rethrow(error)
+            factor.workspace.regularize_eps = min(
+                factor.workspace.regularize_eps * T(10),
+                T(1e-4),
+            )
+            factor.workspace.regularize_delta = min(
+                factor.workspace.regularize_delta * T(10),
+                T(1e-2),
+            )
+            solver.solution.profile.dynamic_regularizations += 1
+        end
+    end
     solver.settings.profile && (solver.solution.profile.nt_refactors += 1)
     return nothing
 end
 
-@inline _mul_P!(::Nothing, y, data, x) =
-    mul_upper_symmetric!(y, data.P, x)
-@inline _mul_P!(pattern::QDLDL.GeneratedPattern, y, data, x) =
-    generated_mul_upper_symmetric!(y, data.P.nzval, x, pattern)
-
-@inline _mul_A!(::Nothing, y, data, x) = mul!(y, data.A, x)
-@inline _mul_A!(pattern::QDLDL.GeneratedPattern, y, data, x) =
-    generated_mul_A!(y, data.A.nzval, x, pattern)
-
-@inline _mul_At!(::Nothing, y, data, x) = mul!(y, data.At, x)
-@inline _mul_At!(pattern::QDLDL.GeneratedPattern, y, data, x) =
-    generated_mul_At!(y, data.A.nzval, x, pattern)
-
-@inline _mul_G!(::Nothing, y, data, x) = mul!(y, data.G, x)
-@inline _mul_G!(pattern::QDLDL.GeneratedPattern, y, data, x) =
-    generated_mul_G!(y, data.G.nzval, x, pattern)
-
-@inline _mul_Gt!(::Nothing, y, data, x) = mul!(y, data.Gt, x)
-@inline _mul_Gt!(pattern::QDLDL.GeneratedPattern, y, data, x) =
-    generated_mul_Gt!(y, data.G.nzval, x, pattern)
+@inline _mul_P!(y, data, x) = mul_upper_symmetric!(y, data.P, x)
+@inline _mul_A!(y, data, x) = mul!(y, data.A, x)
+@inline _mul_At!(y, data, x) = mul!(y, data.At, x)
+@inline _mul_G!(y, data, x) = mul!(y, data.G, x)
+@inline _mul_Gt!(y, data, x) = mul!(y, data.Gt, x)
 
 function kkt_multiply!(
     y::AbstractVector{T},
@@ -181,43 +168,27 @@ function kkt_multiply!(
     work::Workspace{T};
     include_nt::Bool = true,
 ) where {T<:AbstractFloat}
-    return kkt_multiply!(y, x, data, work, nothing; include_nt)
-end
-
-function kkt_multiply!(
-    y::AbstractVector{T},
-    x::AbstractVector{T},
-    data::ProblemData{T},
-    work::Workspace{T},
-    pattern;
-    include_nt::Bool = true,
-) where {T<:AbstractFloat}
     n = Int(data.n)
     p = Int(data.p)
     m = Int(data.m)
 
     xpr = view(x, 1:n)
     ypr = view(y, 1:n)
-    _mul_P!(pattern, ypr, data, xpr)
+    _mul_P!(ypr, data, xpr)
 
     if p > 0
         yeq = view(y, (n + 1):(n + p))
-        _mul_At!(pattern, work.xbuff, data, view(x, (n + 1):(n + p)))
+        _mul_At!(work.xbuff, data, view(x, (n + 1):(n + p)))
         add_scaled!(ypr, one(T), work.xbuff)
-        _mul_A!(pattern, work.ybuff, data, xpr)
+        _mul_A!(work.ybuff, data, xpr)
         copyto!(yeq, work.ybuff)
     end
 
     if m > 0
         ycon = view(y, (n + p + 1):(n + p + m))
-        _mul_Gt!(
-            pattern,
-            work.xbuff,
-            data,
-            view(x, (n + p + 1):(n + p + m)),
-        )
+        _mul_Gt!(work.xbuff, data, view(x, (n + p + 1):(n + p + m)))
         add_scaled!(ypr, one(T), work.xbuff)
-        _mul_G!(pattern, work.ubuff1, data, xpr)
+        _mul_G!(work.ubuff1, data, xpr)
         copyto!(ycon, work.ubuff1)
         if include_nt
             nt_multiply_W!(work.ubuff1, view(x, (n + p + 1):(n + p + m)), data, work)
@@ -229,7 +200,7 @@ function kkt_multiply!(
 end
 
 function _solve_linsys_fast!(
-    solver::Solver{T},
+    solver::CoreSolver{T},
     rhs::AbstractVector{T},
     x::AbstractVector{T},
 ) where {T<:AbstractFloat}
@@ -238,13 +209,7 @@ function _solve_linsys_fast!(
     solver.settings.iter_ref_iters == 0 && return x
     rhs_norm = max(one(T), inf_norm(rhs))
     for _ in 1:solver.settings.iter_ref_iters
-        kkt_multiply!(
-            solver.work.xyzbuff1,
-            x,
-            solver.data,
-            solver.work,
-            solver.linsys.factor.generated_pattern,
-        )
+        kkt_multiply!(solver.work.xyzbuff1, x, solver.data, solver.work)
         @inbounds for i in eachindex(x)
             solver.work.xyzbuff1[i] = rhs[i] - solver.work.xyzbuff1[i]
         end
@@ -256,7 +221,7 @@ function _solve_linsys_fast!(
 end
 
 function _solve_linsys_profiled!(
-    solver::Solver{T},
+    solver::CoreSolver{T},
     rhs::AbstractVector{T},
     x::AbstractVector{T},
 ) where {T<:AbstractFloat}
@@ -269,13 +234,7 @@ function _solve_linsys_profiled!(
     solver.settings.iter_ref_iters == 0 && return x
     rhs_norm = max(one(T), inf_norm(rhs))
     for _ in 1:solver.settings.iter_ref_iters
-        kkt_multiply!(
-            solver.work.xyzbuff1,
-            x,
-            solver.data,
-            solver.work,
-            solver.linsys.factor.generated_pattern,
-        )
+        kkt_multiply!(solver.work.xyzbuff1, x, solver.data, solver.work)
         @inbounds for i in eachindex(x)
             solver.work.xyzbuff1[i] = rhs[i] - solver.work.xyzbuff1[i]
         end
@@ -290,7 +249,7 @@ function _solve_linsys_profiled!(
 end
 
 @inline function solve_linsys!(
-    solver::Solver{T},
+    solver::CoreSolver{T},
     rhs::AbstractVector{T},
     x::AbstractVector{T},
 ) where {T<:AbstractFloat}
@@ -299,7 +258,7 @@ end
            _solve_linsys_fast!(solver, rhs, x)
 end
 
-function initialize_ipm!(solver::Solver{T}) where {T<:AbstractFloat}
+function initialize_ipm!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     if _apply_warmstart!(solver)
         return nothing
     end
@@ -323,13 +282,11 @@ function initialize_ipm!(solver::Solver{T}) where {T<:AbstractFloat}
     return nothing
 end
 
-function compute_kkt_residual!(solver::Solver{T}) where {T<:AbstractFloat}
+function compute_kkt_residual!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     data = solver.data
     work = solver.work
     scaling = solver.scaling
-    pattern = solver.linsys.factor.generated_pattern
-
-    _mul_P!(pattern, work.xbuff, data, work.x)
+    _mul_P!(work.xbuff, data, work.x)
     add_scaled!(work.xbuff, -solver.settings.kkt_static_reg, work.x)
     work.quad_obj = dot(work.xbuff, work.x)
     work.xPx = weighted_dot(work.x, work.xbuff, scaling.Dinvruiz)
@@ -338,10 +295,10 @@ function compute_kkt_residual!(solver::Solver{T}) where {T<:AbstractFloat}
     add_scaled_to!(work.kktres, 1, one(T), data.c, data.n)
 
     if data.p > 0
-        _mul_At!(pattern, work.xbuff, data, work.y)
+        _mul_At!(work.xbuff, data, work.y)
         work.Atyinf = weighted_inf_norm(work.xbuff, scaling.Dinvruiz)
         add_scaled_to!(work.kktres, 1, one(T), work.xbuff, data.n)
-        _mul_A!(pattern, work.ybuff, data, work.x)
+        _mul_A!(work.ybuff, data, work.x)
         work.Axinf = weighted_inf_norm(work.ybuff, scaling.Einvruiz)
         copyto!(work.kktres, data.n + 1, work.ybuff, 1, data.p)
         add_scaled_to!(work.kktres, data.n + 1, -one(T), data.b, data.p)
@@ -351,10 +308,10 @@ function compute_kkt_residual!(solver::Solver{T}) where {T<:AbstractFloat}
     end
 
     if data.m > 0
-        _mul_Gt!(pattern, work.xbuff, data, work.z)
+        _mul_Gt!(work.xbuff, data, work.z)
         work.Gtzinf = weighted_inf_norm(work.xbuff, scaling.Dinvruiz)
         add_scaled_to!(work.kktres, 1, one(T), work.xbuff, data.n)
-        _mul_G!(pattern, work.ubuff1, data, work.x)
+        _mul_G!(work.ubuff1, data, work.x)
         work.Gxinf = weighted_inf_norm(work.ubuff1, scaling.Finvruiz)
         copyto!(work.kktres, data.n + data.p + 1, work.ubuff1, 1, data.m)
         add_scaled_to!(work.kktres, data.n + data.p + 1, -one(T), data.h, data.m)
@@ -366,12 +323,12 @@ function compute_kkt_residual!(solver::Solver{T}) where {T<:AbstractFloat}
     return nothing
 end
 
-function compute_mu!(solver::Solver{T}) where {T<:AbstractFloat}
+function compute_mu!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     solver.work.mu = isempty(solver.work.s) ? zero(T) : safe_div(dot(solver.work.s, solver.work.z), T(length(solver.work.s)))
     return solver.work.mu
 end
 
-function compute_objective!(solver::Solver{T}) where {T<:AbstractFloat}
+function compute_objective!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     data = solver.data
     work = solver.work
     obj = dot(work.x, data.c) + T(0.5) * work.quad_obj
@@ -379,7 +336,7 @@ function compute_objective!(solver::Solver{T}) where {T<:AbstractFloat}
     return solver.solution.obj
 end
 
-function construct_kkt_aff_rhs!(solver::Solver{T}) where {T<:AbstractFloat}
+function construct_kkt_aff_rhs!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     data = solver.data
     work = solver.work
     copy_negate!(work.rhs, work.kktres)
@@ -388,7 +345,7 @@ function construct_kkt_aff_rhs!(solver::Solver{T}) where {T<:AbstractFloat}
     return nothing
 end
 
-function construct_kkt_comb_rhs!(solver::Solver{T}) where {T<:AbstractFloat}
+function construct_kkt_comb_rhs!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     data = solver.data
     work = solver.work
     copy_negate!(work.rhs, work.kktres)
@@ -405,7 +362,7 @@ function construct_kkt_comb_rhs!(solver::Solver{T}) where {T<:AbstractFloat}
     return nothing
 end
 
-function compute_centering!(solver::Solver{T}) where {T<:AbstractFloat}
+function compute_centering!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     if solver.data.m == 0
         solver.work.sigma = zero(T)
         return zero(T)
@@ -422,7 +379,7 @@ function compute_centering!(solver::Solver{T}) where {T<:AbstractFloat}
     return work.sigma
 end
 
-function predictor_corrector!(solver::Solver{T}) where {T<:AbstractFloat}
+function predictor_corrector!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     data = solver.data
     work = solver.work
     Dz_offset = data.n + data.p + 1
@@ -461,7 +418,7 @@ function predictor_corrector!(solver::Solver{T}) where {T<:AbstractFloat}
     return nothing
 end
 
-function check_stopping!(solver::Solver{T}) where {T<:AbstractFloat}
+function check_stopping!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     data = solver.data
     work = solver.work
     scaling = solver.scaling

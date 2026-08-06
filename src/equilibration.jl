@@ -8,9 +8,31 @@ function validate_data(
     l::Integer,
     q::AbstractVector{<:Integer},
 )
+    function validate_sparse(M, name)
+        M === nothing && return nothing
+        M.colptr[1] == 1 || throw(ArgumentError("$name CSC column pointers must start at one"))
+        M.colptr[end] == nnz(M) + 1 || throw(ArgumentError("$name CSC column pointers are inconsistent"))
+        all(isfinite, M.nzval) || throw(ArgumentError("$name must contain only finite values"))
+        @inbounds for col in 1:size(M, 2)
+            previous = 0
+            for position in M.colptr[col]:(M.colptr[col + 1] - 1)
+                row = M.rowval[position]
+                1 <= row <= size(M, 1) || throw(ArgumentError("$name row index is out of bounds"))
+                row > previous || throw(ArgumentError("$name contains duplicate or unsorted row indices"))
+                previous = row
+            end
+        end
+        return nothing
+    end
+    all(isfinite, c) || throw(ArgumentError("c must contain only finite values"))
+    A !== nothing && all(isfinite, b) || A === nothing || throw(ArgumentError("b must contain only finite values"))
+    G !== nothing && all(isfinite, h) || G === nothing || throw(ArgumentError("h must contain only finite values"))
+    validate_sparse(P, "P")
+    validate_sparse(A, "A")
+    validate_sparse(G, "G")
     q === nothing && throw(ArgumentError("q must be provided"))
     l >= 0 || throw(ArgumentError("l must be nonnegative"))
-    all(>=(0), q) || throw(ArgumentError("SOC dimensions must be nonnegative"))
+    all(qi -> qi == 0 || qi >= 2, q) || throw(ArgumentError("SOC dimensions must be zero or at least two"))
     (A === nothing) == (b === nothing) || throw(ArgumentError("A and b must either both be provided or both be omitted"))
     (G === nothing) == (h === nothing) || throw(ArgumentError("G and h must either both be provided or both be omitted"))
     P === nothing || size(P, 1) == size(P, 2) || throw(ArgumentError("P must be square"))
