@@ -149,6 +149,9 @@ function run_jump_benchmarks(;
             ),
         ),
     )
+    # Solver reuse is an identity question, not an iteration-count question:
+    # a warm-started solve can legitimately need zero iterations, and a
+    # rebuilt solver can need many. Compare the object and the factorization.
     println(
         "whole_function_rebuild_count=" *
         string(
@@ -157,7 +160,8 @@ function run_jump_benchmarks(;
                 MOI.RawOptimizerAttribute("rebuild_count"),
             ),
         ) *
-        " solver_reused=$(whole_solver.solution.iters > 0)",
+        " solver_reused=$(whole_solver === MOI.get(backend(whole_case.model), MOI.RawSolver()))" *
+        " ipm_iterations=$(whole_solver.solution.iters)",
     )
     return nothing
 end

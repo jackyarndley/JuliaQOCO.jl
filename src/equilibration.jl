@@ -1,3 +1,33 @@
+# Scaling conventions used throughout the solver.
+#
+# With positive diagonal matrices D (variables), E (equality rows), F (cone
+# rows) and a positive objective scale k, the internally stored data is
+#
+#     P_hat = k D P D  (before the static regularization shift is added)
+#     c_hat = k D c
+#     A_hat = E A D,   b_hat = E b
+#     G_hat = F G D,   h_hat = F h
+#
+# and the iterates relate to original units by
+#
+#     x = D x_hat,   s = F^-1 s_hat,   y = E y_hat / k,   z = F z_hat / k.
+#
+# The identities that follow, and that the stopping criteria rely on, are
+#
+#     s'z      = dot(s_hat, z_hat) / k
+#     x'Px     = dot(x_hat, P_hat x_hat) / k
+#     c'x      = dot(c_hat, x_hat) / k
+#     |c|_inf  = |D^-1 c_hat|_inf / k
+#     |s|_inf  = |F^-1 s_hat|_inf
+#
+# `scaling.Druiz` stores D, `scaling.Dinvruiz` stores D^-1, and likewise for
+# E and F. `scaling.k` stores k and `scaling.kinv` stores 1/k.
+
+# Largest objective scale the equilibration is allowed to introduce. Without a
+# bound, a problem whose objective data is tiny (or exactly zero, as in a pure
+# feasibility problem) drives k to infinity and destroys every unscaling.
+const MAX_OBJECTIVE_SCALE = 1e12
+
 function validate_data(
     P::Union{Nothing,SparseMatrixCSC},
     c::AbstractVector,
@@ -32,7 +62,10 @@ function validate_data(
     validate_sparse(G, "G")
     q === nothing && throw(ArgumentError("q must be provided"))
     l >= 0 || throw(ArgumentError("l must be nonnegative"))
-    all(qi -> qi == 0 || qi >= 2, q) || throw(ArgumentError("SOC dimensions must be zero or at least two"))
+    # A zero-dimensional second-order cone has no head entry, which every cone
+    # kernel assumes exists. Reject it here rather than letting the kernels
+    # read past the block.
+    all(qi -> qi >= 2, q) || throw(ArgumentError("SOC dimensions must be at least two"))
     (A === nothing) == (b === nothing) || throw(ArgumentError("A and b must either both be provided or both be omitted"))
     (G === nothing) == (h === nothing) || throw(ArgumentError("G and h must either both be provided or both be omitted"))
     P === nothing || size(P, 1) == size(P, 2) || throw(ArgumentError("P must be square"))
@@ -69,7 +102,49 @@ function initialize_scaling(data::ProblemData{T}) where {T<:AbstractFloat}
 end
 
 @inline function _ruiz_inverse_sqrt(value::T) where {T<:AbstractFloat}
-    return value > T(SAFE_DIV_EPS) ? inv(sqrt(value)) : one(T)
+    (isfinite(value) && value > T(SAFE_DIV_EPS)) || return one(T)
+    scale = inv(sqrt(value))
+    return isfinite(scale) && scale > zero(T) ? scale : one(T)
+end
+
+# Objective scale for one Ruiz sweep. A zero or unusable objective norm means
+# there is nothing to equilibrate, so the neutral scale one is returned rather
+# than the `safe_div` sentinel, which would overflow k. The result is also
+# bounded so that a merely tiny objective cannot run k away over the sweeps.
+@inline function _objective_scale(norm_value::T, k_so_far::T) where {T<:AbstractFloat}
+    (isfinite(norm_value) && norm_value > T(SAFE_DIV_EPS)) || return one(T)
+    g = inv(norm_value)
+    isfinite(g) && g > zero(T) || return one(T)
+    limit = T(MAX_OBJECTIVE_SCALE)
+    product = k_so_far * g
+    if product > limit
+        g = limit / k_so_far
+    elseif product < inv(limit)
+        g = inv(limit) / k_so_far
+    end
+    return isfinite(g) && g > zero(T) ? g : one(T)
+end
+
+# Cone rows must share one common scale so that the row scaling maps the
+# second-order cone onto itself. The head row alone is a poor representative
+# when the tail rows are much larger or smaller, so the geometric mean of the
+# per-row Ruiz scales is used instead. Logs keep the mean well behaved for
+# large cones.
+function _apply_common_soc_scales!(F::AbstractVector{T}, l::Integer, qdims::AbstractVector{<:Integer}) where {T<:AbstractFloat}
+    idx = Int(l) + 1
+    for qk in qdims
+        log_sum = zero(T)
+        @inbounds for t in idx:(idx + qk - 1)
+            log_sum += log(F[t])
+        end
+        common = exp(log_sum / T(qk))
+        isfinite(common) && common > zero(T) || (common = one(T))
+        @inbounds for t in idx:(idx + qk - 1)
+            F[t] = common
+        end
+        idx += qk
+    end
+    return F
 end
 
 function ruiz_equilibration!(data::ProblemData{T,Ti}, scaling::Scaling{T}, ruiz_iters::Int) where {T<:AbstractFloat,Ti<:Integer}
@@ -100,7 +175,7 @@ function ruiz_equilibration!(data::ProblemData{T,Ti}, scaling::Scaling{T}, ruiz_
             pinf_mean /= max(one(T), T(data.n))
         end
         g = max(g, pinf_mean)
-        g = safe_div(one(T), g)
+        g = _objective_scale(g, scaling.k)
         scaling.k *= g
 
         if nnz(data.A) > 0
@@ -131,13 +206,7 @@ function ruiz_equilibration!(data::ProblemData{T,Ti}, scaling::Scaling{T}, ruiz_
             @inbounds for k in eachindex(F)
                 F[k] = _ruiz_inverse_sqrt(F[k])
             end
-            idx = data.l + 1
-            for qk in data.q
-                @inbounds for t in (idx + 1):(idx + qk - 1)
-                    F[t] = F[idx]
-                end
-                idx += qk
-            end
+            _apply_common_soc_scales!(F, data.l, data.q)
         end
 
         if nnz(data.P) > 0
@@ -164,12 +233,17 @@ function ruiz_equilibration!(data::ProblemData{T,Ti}, scaling::Scaling{T}, ruiz_
     reciprocal!(scaling.Dinvruiz, scaling.Druiz)
     reciprocal!(scaling.Einvruiz, scaling.Eruiz)
     reciprocal!(scaling.Finvruiz, scaling.Fruiz)
-    scaling.kinv = safe_div(one(T), scaling.k)
+    isfinite(scaling.k) && scaling.k > zero(T) || (scaling.k = one(T))
+    scaling.kinv = positive_inv(scaling.k)
     data.stats = compute_scaling_statistics(data)
     data.stats_dirty = false
     return nothing
 end
 
+# Convert the internal scaled iterate held in `work` into the original units of
+# the user problem. This is the only place the four coordinate conversions are
+# written down for output; `_warmstart_to_original!` and
+# `_warmstart_to_scaled!` in updates.jl are their inverses.
 function unscaled_solution!(
     solution::Solution{T},
     data::ProblemData{T},

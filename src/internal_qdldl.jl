@@ -11,6 +11,16 @@ export qdldl, \, solve, solve!, refactor!, update_values!, scale_values!, positi
 using AMD, SparseArrays
 using LinearAlgebra: istriu, triu, Diagonal
 
+# Raised when the numerical factorization cannot proceed: a pivot that is
+# exactly zero, or one that is not finite. Callers use this type to tell a
+# genuine numerical failure apart from a programming error or an interrupt,
+# both of which must propagate untouched.
+struct FactorizationFailure <: Exception
+    message::String
+end
+
+Base.showerror(io::IO, error::FactorizationFailure) = print(io, error.message)
+
 const QDLDL_UNKNOWN = -1;
 const QDLDL_USED   = true;
 const QDLDL_UNUSED = false;
@@ -438,7 +448,10 @@ function factor!(workspace::QDLDLWorkspace{Tf,Ti},logical::Bool) where {Tf<:Abst
     end
 
     if(posDCount < 0)
-        error("Zero entry in D (matrix is not quasidefinite)")
+        throw(FactorizationFailure(
+            "LDL factorization failed: a pivot was zero or not finite, so the " *
+            "regularized KKT matrix is not quasidefinite",
+        ))
     end
 
     workspace.pattern_initialized[] = true
@@ -601,9 +614,10 @@ function QDLDL_factor!(
             regularize_count[1] += 1
         end
 
-        if(D[1] == zeroT) return -1 end
+        if(!isfinite(D[1]) || D[1] == zeroT) return -1 end
         if(D[1]  > zeroT) positiveValuesInD += 1 end
         Dinv[1] = 1/D[1];
+        if(!isfinite(Dinv[1])) return -1 end
     end
 
     #Start from second row here. The upper LH corner is trivially 0
@@ -743,11 +757,12 @@ function QDLDL_factor!(
         #Maintain a count of the positive entries
         #in D.  If we hit a zero, we can't factor
         #this matrix, so abort
-        if(D[k] == zeroT) return -1 end
+        if(!isfinite(D[k]) || D[k] == zeroT) return -1 end
         if(D[k]  > zeroT) positiveValuesInD += 1 end
 
         #compute the inverse of the diagonal
         Dinv[k]= 1/D[k]
+        if(!isfinite(Dinv[k])) return -1 end
 
         k += 1
     end #end while k
@@ -787,7 +802,7 @@ function QDLDL_numeric_factor!(
         D1 = regularize_delta * Dsigns[1]
         regularize_count[1] += 1
     end
-    if(D1 == zeroT)
+    if(!isfinite(D1) || D1 == zeroT)
         return -1
     end
     D[1] = D1
@@ -795,6 +810,9 @@ function QDLDL_numeric_factor!(
         positiveValuesInD += 1
     end
     Dinv[1] = inv(D1)
+    if(!isfinite(Dinv[1]))
+        return -1
+    end
 
     k = 2
     @inbounds while k <= n
@@ -837,7 +855,7 @@ function QDLDL_numeric_factor!(
             Dk = regularize_delta * Dsigns[k]
             regularize_count[1] += 1
         end
-        if(Dk == zeroT)
+        if(!isfinite(Dk) || Dk == zeroT)
             return -1
         end
         D[k] = Dk
@@ -845,6 +863,9 @@ function QDLDL_numeric_factor!(
             positiveValuesInD += 1
         end
         Dinv[k] = inv(Dk)
+        if(!isfinite(Dinv[k]))
+            return -1
+        end
         k += 1
     end
 

@@ -29,10 +29,22 @@ mutable struct SolveProfile
     linsys_solves::Int
     linsys_refinements::Int
     nt_refactors::Int
+    # Number of times the escalating-regularization retry loop fired.
     dynamic_regularizations::Int
+    # Number of pivots the factorization actually had to regularize, which is
+    # a different quantity from the number of retry attempts above.
+    regularized_pivots::Int
+    factorization_retries::Int
+    warmstart_accepted::Int
+    warmstart_repaired::Int
+    warmstart_rejected::Int
+    warmstart_retries::Int
 end
 
-SolveProfile() = SolveProfile(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0, 0)
+SolveProfile() = SolveProfile(
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+)
 
 mutable struct ProblemData{T<:AbstractFloat,Ti<:Integer}
     P::SparseMatrixCSC{T,Ti}
@@ -101,13 +113,34 @@ mutable struct Workspace{T<:AbstractFloat,Ti<:Integer}
     kktres::Vector{T}
     soc_offsets::Vector{Ti}
     Wtri_offsets::Vector{Ti}
+    # Sparse second-order-cone expansion. `soc_expanded[b]` says whether cone
+    # `b` replaces its dense upper-triangular Nesterov-Todd block with two
+    # auxiliary variables; `soc_aux` holds that block's KKT values laid out as
+    # [g(1..q); +1; f(1..q); -1] starting at `soc_aux_offsets[b]`.
+    # See `docs/internals.md` for the algebra.
+    soc_expanded::Vector{Bool}
+    soc_aux::Vector{T}
+    soc_aux_offsets::Vector{Ti}
+    # Right-hand side and solution buffer for the augmented system, which is
+    # longer than n + p + m by two entries per expanded cone.
+    xyz_aug::Vector{T}
+    # Scaled quadratic form dot(x_hat, P_hat x_hat); the objective is derived
+    # from it by dividing out the objective scale k.
     quad_obj::T
+    # Everything below is kept in ORIGINAL problem units so that the stopping
+    # criteria never mix scaled and unscaled quantities.
     xPx::T
     Pxinf::T
     Atyinf::T
     Gtzinf::T
     Axinf::T
     Gxinf::T
+    sinf::T
+    # Reference norms of the problem data. These are constant during a solve
+    # and are refreshed once by `refresh_data_norms!`.
+    cinf::T
+    binf::T
+    hinf::T
 end
 
 mutable struct Solution{T<:AbstractFloat}
@@ -115,13 +148,23 @@ mutable struct Solution{T<:AbstractFloat}
     s::Vector{T}
     y::Vector{T}
     z::Vector{T}
+    # Number of interior-point iterations actually performed. This is solver
+    # work done, and is deliberately independent of `result_iter`, the index
+    # of the iterate whose vectors and metrics were published.
     iters::Int
+    result_iter::Int
     setup_time_sec::Float64
     solve_time_sec::Float64
     obj::T
     pres::T
     dres::T
     gap::T
+    # Normalized quality of the published iterate: the largest of the
+    # residual-to-tolerance ratios at the requested precision. A value of at
+    # most one means every requested tolerance is met.
+    quality::T
+    cone_valid::Bool
+    result_available::Bool
     status::SolveStatus
     status_detail::String
     profile::SolveProfile
@@ -130,15 +173,16 @@ mutable struct Solution{T<:AbstractFloat}
     best_y::Vector{T}
     best_z::Vector{T}
     best_metric::T
+    best_iter::Int
     best_valid::Bool
 end
 
 function Solution(::Type{T}, n::Integer, m::Integer, p::Integer) where {T<:AbstractFloat}
     z = zero(T)
     return Solution{T}(
-        zeros(T, n), zeros(T, m), zeros(T, p), zeros(T, m), 0, 0.0, 0.0,
-        z, z, z, z, QOCO_UNSOLVED, "", SolveProfile(),
-        zeros(T, n), zeros(T, m), zeros(T, p), zeros(T, m), floatmax(T), false,
+        zeros(T, n), zeros(T, m), zeros(T, p), zeros(T, m), 0, 0, 0.0, 0.0,
+        z, z, z, z, floatmax(T), false, false, QOCO_UNSOLVED, "", SolveProfile(),
+        zeros(T, n), zeros(T, m), zeros(T, p), zeros(T, m), floatmax(T), 0, false,
     )
 end
 
@@ -158,6 +202,14 @@ mutable struct LinearSystem{T<:AbstractFloat,Ti<:Integer}
     nt2kkt::Vector{Ti}
     ntdiag_positions::Vector{Ti}
     nt_values::Vector{T}
+    # Expanded second-order-cone entries. Unlike the `nt` entries, which the
+    # KKT matrix takes negated, these are written straight through; the two
+    # auxiliary diagonals per cone are regularized in opposite directions
+    # because they sit on opposite sides of the quasidefinite partition.
+    aux2kkt::Vector{Ti}
+    aux_values::Vector{T}
+    auxpos_diag::Vector{Ti}
+    auxneg_diag::Vector{Ti}
     static2kkt::Vector{Ti}
     static_values::Vector{T}
 end

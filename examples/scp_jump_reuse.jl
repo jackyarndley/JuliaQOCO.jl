@@ -3,13 +3,16 @@ using JuliaQOCO
 
 const MOI = JuMP.MOI
 
-mutable struct JuMPSCPCase
+# Concretely typed on purpose: untyped containers here would make the example
+# itself the dominant cost of any allocation measurement taken through it. This
+# is a property of the example, not of the numerical core.
+mutable struct JuMPSCPCase{X,U,R}
     model::JuMP.Model
-    x
-    u
-    trust
-    dynamics
-    trust_cones
+    x::X
+    u::U
+    trust::R
+    dynamics::Matrix{JuMP.ConstraintRef}
+    trust_cones::Vector{JuMP.ConstraintRef}
     horizon::Int
     nx::Int
     nu::Int
@@ -71,7 +74,7 @@ function build_jump_scp_case(;
         sum(0.05 * trust[k] for k in 1:horizon) -
         sum(0.01 * x[horizon, i] for i in 1:nx),
     )
-    return JuMPSCPCase(
+    return JuMPSCPCase{typeof(x),typeof(u),typeof(trust)}(
         model,
         x,
         u,

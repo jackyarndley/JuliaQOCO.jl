@@ -4,6 +4,7 @@
     QOCO_SOLVED_INACCURATE = 2
     QOCO_NUMERICAL_ERROR = 3
     QOCO_MAX_ITER = 4
+    QOCO_TIME_LIMIT = 5
 end
 
 const STATUS_MESSAGES = Dict(
@@ -12,6 +13,7 @@ const STATUS_MESSAGES = Dict(
     QOCO_SOLVED_INACCURATE => "solved_inaccurately",
     QOCO_NUMERICAL_ERROR => "numerical_error",
     QOCO_MAX_ITER => "max_iterations",
+    QOCO_TIME_LIMIT => "time_limit",
 )
 
 status_string(status::SolveStatus, detail::AbstractString = "") =

@@ -2,8 +2,30 @@ const SAFE_DIV_EPS = 1e-15
 
 @inline elapsed_time_sec(t0::UInt64) = (time_ns() - t0) * 1e-9
 
+# Ratio used where a vanishing denominator means "no restriction", such as a
+# barrier ratio or a fraction-to-boundary step: the huge positive sentinel is
+# discarded by the caller by taking a `min`. Do not use it where the sign of
+# the result matters, or where a small denominator is a genuine numerical
+# failure; use `checked_div` or `positive_inv` instead.
 @inline function safe_div(a::T, b::T) where {T<:AbstractFloat}
     return abs(b) > T(SAFE_DIV_EPS) ? a / b : floatmax(T)
+end
+
+# Sign-preserving division that reports an unusable denominator as NaN rather
+# than fabricating a large positive value.
+@inline function checked_div(a::T, b::T) where {T<:AbstractFloat}
+    (isfinite(a) && isfinite(b) && abs(b) > T(SAFE_DIV_EPS)) || return T(NaN)
+    value = a / b
+    return isfinite(value) ? value : T(NaN)
+end
+
+# Inverse of a strictly positive scale, clamped to stay finite and positive.
+# Used for the Ruiz scale inverses and the objective scale, where a zero or
+# nonfinite inverse would silently destroy the unscaling algebra.
+@inline function positive_inv(b::T) where {T<:AbstractFloat}
+    (isfinite(b) && b > zero(T)) || return one(T)
+    value = inv(b)
+    return isfinite(value) && value > zero(T) ? value : one(T)
 end
 
 function reset_solve_profile!(profile::SolveProfile)
@@ -21,6 +43,12 @@ function reset_solve_profile!(profile::SolveProfile)
     profile.linsys_refinements = 0
     profile.nt_refactors = 0
     profile.dynamic_regularizations = 0
+    profile.regularized_pivots = 0
+    profile.factorization_retries = 0
+    profile.warmstart_accepted = 0
+    profile.warmstart_repaired = 0
+    profile.warmstart_rejected = 0
+    profile.warmstart_retries = 0
     return profile
 end
 
@@ -38,9 +66,11 @@ function ew_product!(dest::AbstractVector{T}, x::AbstractVector{T}, y::AbstractV
     return dest
 end
 
+# Ruiz scale vectors are strictly positive by construction; the clamped
+# inverse preserves that invariant even for a degenerate zero entry.
 function reciprocal!(dest::AbstractVector{T}, x::AbstractVector{T}) where {T<:AbstractFloat}
     @inbounds @simd for i in eachindex(dest, x)
-        dest[i] = safe_div(one(T), x[i])
+        dest[i] = positive_inv(x[i])
     end
     return dest
 end
@@ -125,11 +155,24 @@ function weighted_inf_norm_from(x::AbstractVector{T}, xoffset::Int, w::AbstractV
     return nrm
 end
 
+# sum_i (x_i w_i) * (y_i w_i): a dot product for two vectors that share the
+# same coordinate scaling. The complementarity product between s and z is NOT
+# of this form, because those two carry reciprocal row scales; see
+# `check_stopping!` for the correct conversion.
 function weighted_dot(x::AbstractVector{T}, y::AbstractVector{T}, w::AbstractVector{T}) where {T<:AbstractFloat}
     acc = zero(T)
     @inbounds @simd for i in eachindex(x, y, w)
         wi = w[i]
         acc += (x[i] * wi) * (y[i] * wi)
+    end
+    return acc
+end
+
+# Unweighted dot between a slice of a long buffer and a short vector.
+function dot_from(x::AbstractVector{T}, xoffset::Int, y::AbstractVector{T}, n::Int) where {T<:AbstractFloat}
+    acc = zero(T)
+    @inbounds @simd for i in 1:n
+        acc += x[xoffset + i - 1] * y[i]
     end
     return acc
 end
@@ -151,6 +194,17 @@ function has_nan(x::AbstractVector)
     end
     return false
 end
+
+# Prefer this over `has_nan` at numerical boundaries: an infinity is as
+# unusable as a NaN for warm starts, directions, pivots and final results.
+function has_nonfinite(x::AbstractVector)
+    @inbounds for xi in x
+        isfinite(xi) || return true
+    end
+    return false
+end
+
+all_finite(x::AbstractVector) = !has_nonfinite(x)
 
 function compute_scaling_statistics(data::ProblemData{T}) where {T<:AbstractFloat}
     obj_min = zero(T)

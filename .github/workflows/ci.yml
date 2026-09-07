@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Julia ${{ matrix.julia-version }} - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        julia-version: ['1', 'lts']
+        os: [ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia-version }}
+      - uses: julia-actions/cache@v2
+      - uses: julia-actions/julia-buildpkg@v1
+      # Correctness only. The comparative timing benchmarks are deliberately
+      # not run here: shared runners cannot support an absolute runtime
+      # threshold that means anything.
+      - uses: julia-actions/julia-runtest@v1
+
+  smoke:
+    name: Examples and benchmark smoke run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+      - name: Instantiate the benchmark environment
+        run: |
+          julia --project=benchmark -e '
+            using Pkg
+            Pkg.develop(path=".")
+            Pkg.instantiate()'
+      - name: Repeated-solve example
+        run: julia --project=benchmark examples/scp_jump_reuse.jl
+      # A quick pass over every benchmark workload, so that a change which
+      # breaks the harness is caught even though the timings themselves are
+      # not asserted on.
+      - name: Benchmark smoke run
+        run: julia --project=benchmark benchmark/runbenchmarks.jl --quick
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark/results/

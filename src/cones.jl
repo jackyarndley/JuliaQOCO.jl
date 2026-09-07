@@ -1,17 +1,36 @@
-@inline function soc_residual(u::AbstractVector{T}, first::Int, q::Int) where {T<:AbstractFloat}
+# Euclidean norm of the tail of one second-order cone block. The plain sum of
+# squares is used on the common path; if it overflows, the block is renormalized
+# by its largest entry and the norm is recovered exactly.
+@inline function soc_tail_norm(u::AbstractVector{T}, first::Int, q::Int) where {T<:AbstractFloat}
     acc = zero(T)
     @inbounds for i in (first + 1):(first + q - 1)
         acc += u[i] * u[i]
     end
-    return sqrt(acc) - u[first]
+    isfinite(acc) && return sqrt(acc)
+    scale = zero(T)
+    @inbounds for i in (first + 1):(first + q - 1)
+        scale = max(scale, abs(u[i]))
+    end
+    scale > zero(T) || return zero(T)
+    acc = zero(T)
+    @inbounds for i in (first + 1):(first + q - 1)
+        ratio = u[i] / scale
+        acc += ratio * ratio
+    end
+    return scale * sqrt(acc)
 end
 
+@inline function soc_residual(u::AbstractVector{T}, first::Int, q::Int) where {T<:AbstractFloat}
+    return soc_tail_norm(u, first, q) - u[first]
+end
+
+# Cone determinant u0^2 - |u_tail|^2. The factored form is used because the
+# subtraction of two nearly equal squares loses most of its significant digits
+# exactly where it matters, at a point close to the cone boundary.
 @inline function soc_residual2(u::AbstractVector{T}, first::Int, q::Int) where {T<:AbstractFloat}
-    acc = u[first] * u[first]
-    @inbounds for i in (first + 1):(first + q - 1)
-        acc -= u[i] * u[i]
-    end
-    return acc
+    tail = soc_tail_norm(u, first, q)
+    head = u[first]
+    return (head - tail) * (head + tail)
 end
 
 function cone_product!(p::AbstractVector{T}, u::AbstractVector{T}, v::AbstractVector{T}, l::Int, qdims::AbstractVector{<:Integer}) where {T<:AbstractFloat}
@@ -222,28 +241,20 @@ function compute_nt_scaling!(solver::CoreSolver{T}) where {T<:AbstractFloat}
         end
 
         scale = sqrt(safe_div(s_scal, z_scal))
-        invscale = safe_div(one(T), scale)
         scale2 = scale * scale
         work.nt_scale[block] = scale
         @inbounds for k in 0:(q - 1)
             work.nt_v[idx + k] = work.zbar[k + 1]
         end
-        shift = 0
-        @inbounds for j in 1:q
-            for k in 1:j
-                wval = T(2) * work.zbar[k] * work.zbar[j]
-                winvval = (j > 1 && k == 1) ? -wval : wval
-                if j == 1 && k == 1
-                    wval -= one(T)
-                    winvval -= one(T)
-                elseif j == k
-                    wval += one(T)
-                    winvval += one(T)
-                end
-                wval *= scale
-                winvval *= invscale
-                shift += 1
+
+        if work.soc_expanded[block]
+            # The dense upper triangle is replaced by q diagonal entries plus
+            # the rank-two expansion in `soc_aux`.
+            @inbounds for j in 1:q
+                work.WtW[toffset + j - 1] = scale2
             end
+            soc_expansion_vectors!(work, block, Int(q))
+            continue
         end
 
         gamma_bar = work.zbar[1]
@@ -287,69 +298,122 @@ function subtract_e!(x::AbstractVector{T}, a::T, l::Int, qdims::AbstractVector{<
     return x
 end
 
+# Fraction-to-boundary rule. Every line search below returns
+#
+#     min(1, f * alpha_max)
+#
+# where alpha_max is the exact distance to the cone boundary along the
+# direction. Starting from one rather than from f means an unrestricted
+# direction, or one whose boundary already lies beyond 1/f, takes the full
+# Newton step instead of being damped for no reason.
+@inline _fraction_to_boundary(boundary::T, f::T) where {T<:AbstractFloat} =
+    min(one(T), f * boundary)
+
 function exact_linesearch(u::AbstractVector{T}, Du::AbstractVector{T}, l::Int, f::T) where {T<:AbstractFloat}
-    minval = zero(T)
+    step = one(T)
     @inbounds for i in 1:l
-        if Du[i] < minval * u[i]
-            minval = Du[i] / u[i]
+        direction = Du[i]
+        if direction < zero(T)
+            step = min(step, _fraction_to_boundary(-u[i] / direction, f))
         end
     end
-    return -f < minval ? f : -safe_div(f, minval)
+    return max(step, zero(T))
 end
 
 function exact_linesearch_from(u::AbstractVector{T}, Du::AbstractVector{T}, Du_offset::Int, l::Int, f::T) where {T<:AbstractFloat}
-    minval = zero(T)
+    step = one(T)
     @inbounds for i in 1:l
-        dui = Du[Du_offset + i - 1]
-        if dui < minval * u[i]
-            minval = dui / u[i]
+        direction = Du[Du_offset + i - 1]
+        if direction < zero(T)
+            step = min(step, _fraction_to_boundary(-u[i] / direction, f))
         end
     end
-    return -f < minval ? f : -safe_div(f, minval)
+    return max(step, zero(T))
 end
 
-function bisection_search!(solver::CoreSolver{T}, u::AbstractVector{T}, Du::AbstractVector{T}, f::T) where {T<:AbstractFloat}
-    work = solver.work
-    data = solver.data
-    axpy_to!(work.ubuff1, safe_div(one(T), f), Du, u)
-    if cone_residual(work.ubuff1, data.l, data.q) < zero(T)
-        return one(T)
+# Number of halvings the safeguarded fallback may use to bracket a feasible
+# step. Thirty halvings reach 1e-9, far below the resolution of the five-step
+# bisection this replaces, which could only ever return zero or a multiple of
+# 1/32 and so reported "no step" for any feasible step under 1/32.
+const MAX_LINESEARCH_BACKTRACKS = 30
+
+@inline function _trial_point!(
+    buffer::AbstractVector{T},
+    u::AbstractVector{T},
+    Du::AbstractVector{T},
+    Du_offset::Int,
+    alpha::T,
+) where {T<:AbstractFloat}
+    @inbounds @simd for i in eachindex(buffer, u)
+        buffer[i] = u[i] + alpha * Du[Du_offset + i - 1]
     end
-    al = zero(T)
-    au = one(T)
-    a = zero(T)
-    for _ in 1:solver.settings.bisect_iters
-        a = T(0.5) * (al + au)
-        axpy_to!(work.ubuff1, safe_div(a, f), Du, u)
-        if cone_residual(work.ubuff1, data.l, data.q) >= zero(T)
-            au = a
-        else
-            al = a
-        end
-    end
-    return al
+    return buffer
 end
 
-function bisection_search_from!(solver::CoreSolver{T}, u::AbstractVector{T}, Du::AbstractVector{T}, Du_offset::Int, f::T) where {T<:AbstractFloat}
+@inline function _is_interior(u::AbstractVector{T}, l::Integer, qdims::AbstractVector{<:Integer}) where {T<:AbstractFloat}
+    all_finite(u) || return false
+    return cone_residual(u, Int(l), qdims) < zero(T)
+end
+
+# Safeguarded fallback used when the analytical solution is not trustworthy.
+# It first tries the full step, then backtracks geometrically until it finds a
+# strictly feasible point, and finally refines the bracket by bisection. It
+# returns zero only when no positive step above the backtracking floor keeps
+# the iterate inside the cone, which is a genuine numerical failure rather than
+# an artefact of the search resolution.
+function safeguarded_linesearch!(
+    solver::CoreSolver{T},
+    u::AbstractVector{T},
+    Du::AbstractVector{T},
+    Du_offset::Int,
+    f::T,
+) where {T<:AbstractFloat}
     work = solver.work
     data = solver.data
-    axpy_to_from!(work.ubuff1, safe_div(one(T), f), Du, Du_offset, u)
-    if cone_residual(work.ubuff1, data.l, data.q) < zero(T)
-        return one(T)
+    buffer = work.ubuff1
+
+    _trial_point!(buffer, u, Du, Du_offset, one(T))
+    _is_interior(buffer, data.l, data.q) && return one(T)
+
+    feasible = zero(T)
+    infeasible = one(T)
+    alpha = one(T)
+    for _ in 1:MAX_LINESEARCH_BACKTRACKS
+        alpha *= T(0.5)
+        _trial_point!(buffer, u, Du, Du_offset, alpha)
+        if _is_interior(buffer, data.l, data.q)
+            feasible = alpha
+            break
+        end
+        infeasible = alpha
     end
-    al = zero(T)
-    au = one(T)
-    a = zero(T)
-    for _ in 1:solver.settings.bisect_iters
-        a = T(0.5) * (al + au)
-        axpy_to_from!(work.ubuff1, safe_div(a, f), Du, Du_offset, u)
-        if cone_residual(work.ubuff1, data.l, data.q) >= zero(T)
-            au = a
+    feasible > zero(T) || return zero(T)
+
+    for _ in 1:max(solver.settings.bisect_iters, 1)
+        alpha = T(0.5) * (feasible + infeasible)
+        _trial_point!(buffer, u, Du, Du_offset, alpha)
+        if _is_interior(buffer, data.l, data.q)
+            feasible = alpha
         else
-            al = a
+            infeasible = alpha
         end
     end
-    return al
+    return _fraction_to_boundary(feasible, f)
+end
+
+# Fraction of the cone scale by which a repaired point is pushed inside. It has
+# to be far above rounding: a point that is merely finitely interior, a few
+# ulps off the boundary, is numerically valid but algorithmically stuck, since
+# the interior-point method cannot move away from the face it is pinned to.
+const CONE_REPAIR_FRACTION = 1e-4
+
+# Push a point strictly inside the cone. The margin is relative to the
+# magnitude of the point, so a warm start whose cone entries are of order 1e6
+# is not "repaired" by an absolute shift that leaves it on the boundary, and
+# one of order 1e-6 is not swamped by it.
+function relative_cone_margin(u::AbstractVector{T}) where {T<:AbstractFloat}
+    scale = max(one(T), inf_norm(u))
+    return max(sqrt(eps(T)), T(CONE_REPAIR_FRACTION) * scale)
 end
 
 function bring2cone_strict!(
@@ -363,12 +427,7 @@ function bring2cone_strict!(
     end
     idx = l + 1
     for q in qdims
-        tail_norm2 = zero(T)
-        @inbounds for k in 1:(q - 1)
-            tail = u[idx + k]
-            tail_norm2 += tail * tail
-        end
-        u[idx] = max(u[idx], sqrt(tail_norm2) + margin)
+        u[idx] = max(u[idx], soc_tail_norm(u, idx, q) + margin)
         idx += q
     end
     return u
@@ -404,6 +463,65 @@ end
     return root
 end
 
+# Exact distance to the boundary of one second-order cone along u + α*Du.
+# The quadratic α^2*(d0^2 - |d|^2) + 2α*(u0*d0 - <u,d>) + (u0^2 - |u|^2) = 0 is
+# formed after normalizing both blocks by their largest entry, which keeps all
+# three coefficients of order one regardless of the magnitude of the data, and
+# the two determinants are evaluated in factored form to avoid the cancellation
+# that dominates near the boundary. Returns `nothing` when the starting point
+# is not usably interior, so that the caller can fall back to a search.
+function _soc_boundary_step(
+    u::AbstractVector{T},
+    Du::AbstractVector{T},
+    Du_offset::Int,
+    first::Int,
+    qdim::Int,
+) where {T<:AbstractFloat}
+    u_scale = zero(T)
+    d_scale = zero(T)
+    @inbounds for k in 0:(qdim - 1)
+        u_scale = max(u_scale, abs(u[first + k]))
+        d_scale = max(d_scale, abs(Du[Du_offset + first + k - 1]))
+    end
+    (isfinite(u_scale) && isfinite(d_scale)) || return nothing
+    # A zero direction never leaves the cone.
+    d_scale > zero(T) || return T(Inf)
+    u_scale > zero(T) || return nothing
+
+    u_head = u[first] / u_scale
+    d_head = Du[Du_offset + first - 1] / d_scale
+    u_tail2 = zero(T)
+    d_tail2 = zero(T)
+    cross = u_head * d_head
+    @inbounds for k in 1:(qdim - 1)
+        uk = u[first + k] / u_scale
+        dk = Du[Du_offset + first + k - 1] / d_scale
+        u_tail2 += uk * uk
+        d_tail2 += dk * dk
+        cross -= uk * dk
+    end
+    u_tail = sqrt(u_tail2)
+    d_tail = sqrt(d_tail2)
+    c = (u_head - u_tail) * (u_head + u_tail)
+    a = (d_head - d_tail) * (d_head + d_tail)
+    # The root selection relies on the start being strictly interior. Right at
+    # the boundary the factored determinant can round to zero or below, and the
+    # caller then falls back to a search rather than trusting a root here.
+    c > zero(T) || return nothing
+
+    ratio = u_scale / d_scale
+    # Substituting β = α / ratio makes the quadratic a*β^2 + 2b*β + c = 0.
+    beta = _smallest_positive_root(a, cross, c)
+    if !isfinite(beta)
+        # A concave quadratic starting positive must cross zero, so a missing
+        # root means the coefficients are not trustworthy.
+        a < zero(T) && return nothing
+        return T(Inf)
+    end
+    step = beta * ratio
+    return isfinite(step) && step >= zero(T) ? step : nothing
+end
+
 function _analytical_cone_linesearch(
     u::AbstractVector{T},
     Du::AbstractVector{T},
@@ -412,50 +530,29 @@ function _analytical_cone_linesearch(
     qdims::AbstractVector{<:Integer},
     f::T,
 ) where {T<:AbstractFloat}
-    step = f
+    step = one(T)
     @inbounds for i in 1:l
         direction = Du[Du_offset + i - 1]
         if direction < zero(T)
-            step = min(step, -f * u[i] / direction)
+            u[i] > zero(T) || return nothing
+            step = min(step, _fraction_to_boundary(-u[i] / direction, f))
         end
     end
 
     first = l + 1
     for qdim in qdims
-        u0 = u[first]
-        d0 = Du[Du_offset + first - 1]
-        a = d0 * d0
-        b = u0 * d0
-        c = u0 * u0
-        @inbounds for k in 1:(qdim - 1)
-            uk = u[first + k]
-            dk = Du[Du_offset + first + k - 1]
-            a -= dk * dk
-            b -= uk * dk
-            c -= uk * uk
-        end
-        boundary = _smallest_positive_root(a, b, c)
-        if isfinite(boundary)
-            head_at_boundary = muladd(boundary, d0, u0)
-            tolerance = T(128) * eps(T) * max(one(T), abs(u0))
-            if !isfinite(head_at_boundary) || head_at_boundary <= -tolerance
-                return nothing
-            end
-            step = min(step, f * boundary)
-        elseif a < zero(T) || b < zero(T)
-            # A direction that eventually leaves the cone must have a
-            # positive boundary. Treat a missing root as numerically suspect.
-            return nothing
-        end
+        boundary = _soc_boundary_step(u, Du, Du_offset, first, qdim)
+        boundary === nothing && return nothing
+        isfinite(boundary) && (step = min(step, _fraction_to_boundary(boundary, f)))
         first += qdim
     end
-    return clamp(step, zero(T), one(T))
+    return isfinite(step) ? clamp(step, zero(T), one(T)) : nothing
 end
 
 function linesearch!(solver::CoreSolver{T}, u::AbstractVector{T}, Du::AbstractVector{T}, f::T) where {T<:AbstractFloat}
     isempty(solver.data.q) && return exact_linesearch(u, Du, solver.data.l, f)
     step = _analytical_cone_linesearch(u, Du, 1, solver.data.l, solver.data.q, f)
-    return step === nothing ? bisection_search!(solver, u, Du, f) : step
+    return step === nothing ? safeguarded_linesearch!(solver, u, Du, 1, f) : step
 end
 
 function linesearch_from!(solver::CoreSolver{T}, u::AbstractVector{T}, Du::AbstractVector{T}, Du_offset::Int, f::T) where {T<:AbstractFloat}
@@ -470,5 +567,5 @@ function linesearch_from!(solver::CoreSolver{T}, u::AbstractVector{T}, Du::Abstr
         f,
     )
     return step === nothing ?
-           bisection_search_from!(solver, u, Du, Du_offset, f) : step
+           safeguarded_linesearch!(solver, u, Du, Du_offset, f) : step
 end

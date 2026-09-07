@@ -1,15 +1,82 @@
-function count_diag_upper(P::SparseMatrixCSC)
-    count = 0
+# Convexity validation for the quadratic objective.
+#
+# The stored Hessian is `P_hat = k D P D` plus a static regularization shift on
+# the diagonal. Both k > 0 and the diagonal D > 0, so `P_hat` without the shift
+# is a congruence transform of P and has the same inertia: verifying the stored
+# matrix therefore verifies the user matrix, and no unscaled copy is needed.
+#
+# Three tests are used, in increasing cost, and each is conclusive where it
+# applies:
+#
+#  1. A diagonal pattern is positive semidefinite exactly when every diagonal
+#     entry is nonnegative. O(nnz), and this is the common case for the
+#     quadratic penalties that appear in sequential convex programming.
+#  2. Below `dense_limit`, a dense symmetric eigenvalue decomposition.
+#  3. Above it, a Cholesky factorization of `P + shift*I`. Success proves
+#     `P + shift*I` is positive definite and hence that the smallest eigenvalue
+#     of P exceeds `-shift`, which is exactly the semidefinite tolerance the
+#     dense test applies. This is a genuine positive-definiteness test of a
+#     shifted matrix, not an inertia count read off a sign-forced regularized
+#     LDL factorization, which would prove nothing about P.
+
+function is_diagonal_pattern(P::SparseMatrixCSC)
     @inbounds for j in 1:size(P, 2)
-        start = P.colptr[j]
-        stop = P.colptr[j + 1] - 1
-        count += start <= stop && P.rowval[stop] == j
+        for k in P.colptr[j]:(P.colptr[j + 1] - 1)
+            P.rowval[k] == j || return false
+        end
     end
-    return count
+    return true
 end
 
-function regularize_P(P::SparseMatrixCSC{T,Ti}, reg::T) where {T<:AbstractFloat,Ti<:Integer}
-    return first(regularize_P_with_info(P, reg))
+# Smallest tolerated eigenvalue, relative to the magnitude of the matrix.
+function _psd_tolerance(P::SparseMatrixCSC{T}, static_reg::T) where {T<:AbstractFloat}
+    scale = max(one(T), inf_norm(P.nzval))
+    return max(sqrt(eps(T)) * scale, T(2) * static_reg)
+end
+
+# `static_reg` is the shift that `regularize_existing_P!` added to the stored
+# diagonal, and is removed here so that the mathematical Hessian is tested.
+function is_positive_semidefinite(
+    P::SparseMatrixCSC{T},
+    static_reg::T,
+    dense_limit::Integer,
+) where {T<:AbstractFloat}
+    nnz(P) > 0 || return true
+    all(isfinite, P.nzval) || return false
+    tolerance = _psd_tolerance(P, static_reg)
+    n = size(P, 1)
+    if is_diagonal_pattern(P)
+        @inbounds for k in 1:nnz(P)
+            P.nzval[k] - static_reg >= -tolerance || return false
+        end
+        return true
+    end
+    if n <= dense_limit
+        dense = Matrix(Symmetric(P))
+        @inbounds for i in 1:n
+            dense[i, i] -= static_reg
+        end
+        return minimum(eigvals(Symmetric(dense))) >= -tolerance
+    end
+    return _shifted_cholesky_succeeds(P, tolerance - static_reg)
+end
+
+# Cholesky of the stored upper-triangular Hessian plus `shift` on the
+# diagonal. The sparse factorization is used where the element type supports
+# it, since a large sequential-convex-programming Hessian is sparse and a
+# dense O(n^3) decomposition on every objective replacement is exactly the
+# cost this policy exists to avoid.
+function _shifted_cholesky_succeeds(P::SparseMatrixCSC{Float64}, shift::Float64)
+    factor = cholesky(Symmetric(P, :U); shift = shift, check = false)
+    return issuccess(factor)
+end
+
+function _shifted_cholesky_succeeds(P::SparseMatrixCSC{T}, shift::T) where {T<:AbstractFloat}
+    dense = Matrix(Symmetric(P))
+    @inbounds for i in 1:size(dense, 1)
+        dense[i, i] += shift
+    end
+    return isposdef(Symmetric(dense))
 end
 
 function regularize_P_with_info(P::SparseMatrixCSC{T,Ti}, reg::T) where {T<:AbstractFloat,Ti<:Integer}
@@ -39,13 +106,6 @@ function regularize_P_with_info(P::SparseMatrixCSC{T,Ti}, reg::T) where {T<:Abst
     end
     return SparseMatrixCSC(n, n, colptr, rowval, nzval), padded_idx
 end
-
-function construct_identity_upper(::Type{T}, n::Integer, λ::T) where {T<:AbstractFloat}
-    Ti = Int
-    return SparseMatrixCSC(n, n, Ti[1:(n + 1)...], Ti[1:n...], fill(λ, n))
-end
-
-create_transposed_matrix(A::SparseMatrixCSC) = first(create_transposed_matrix_with_map(A))
 
 function create_transposed_matrix_with_map(A::SparseMatrixCSC{T,Ti}) where {T,Ti<:Integer}
     m, n = size(A)
