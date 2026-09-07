@@ -35,9 +35,39 @@ semidefinite and is supplied in the upper-triangular CSC convention; MathOptInte
 `ScalarQuadraticTerm(a, x, x)` contributes `(1/2) a x^2` and an off-diagonal
 term `ScalarQuadraticTerm(a, x, y)` contributes `a x y`.
 
-Only `Float64` is supported in practice. The numerical types are parameterized,
-but the settings, factorization and tolerances are exercised and tuned for
-`Float64` alone, and no other element type is advertised.
+## Numeric types
+
+`Float64` and `Float32` are both supported and both tested. Construct
+`JuliaQOCO.Optimizer{Float32}` for single precision, or pass `Float32` data to
+the native interface; the sparse index type is independent and may be narrowed
+to `Int32` as well.
+
+Every tolerance, regularization size and division guard is derived from
+`eps(T)` rather than written as a literal, because a fixed constant is not a
+safe default across precisions. Concretely, an absolute tolerance of `1e-7` is
+*below* `eps(Float32)` and so can never be met, and a regularization shift of
+`1e-8` added to a diagonal entry of order one vanishes entirely in single
+precision. The `Float64` defaults are unchanged: each rule is a floor at the
+tuned double-precision value plus a term proportional to `eps(T)` that only
+takes over in lower precision.
+
+| setting | `Float64` | `Float32` |
+| --- | ---: | ---: |
+| `abstol`, `reltol` | 1e-7 | 3.45e-5 |
+| `abstol_inacc`, `reltol_inacc` | 1e-5 | 3.45e-3 |
+| `kkt_static_reg`, `kkt_dynamic_reg` | 1e-8 | 2.31e-4 |
+| `iter_ref_tol` | 1.49e-8 | 1e-5 |
+
+Accuracy follows the arithmetic: on the test fixtures, `Float64` reaches
+residuals around `1e-13` and `Float32` around `1e-6`, and in both cases the
+reported status is backed by the same independently checked original-unit
+quality. Single precision is not a way to get double-precision answers faster;
+it is a way to solve to single-precision accuracy in half the memory.
+
+Other `AbstractFloat` types will construct and run, since the rules above are
+written in terms of `eps(T)`, but only `Float64` and `Float32` are covered by
+the test suite. `BigFloat` in particular will not benefit from tighter
+tolerances than the `Float64` floors allow.
 
 Supported constraints are `VariableIndex` and `ScalarAffineFunction` in
 `EqualTo`, `LessThan`, `GreaterThan` and `Interval`, and `VectorOfVariables`
@@ -243,6 +273,7 @@ several minutes. During development, run a subset:
 
 ```sh
 julia --project=. test/runtests.jl native numerics
+julia --project=. test/runtests.jl types      # Float64 and Float32 coverage
 julia --project=. test/runtests.jl moi
 ```
 

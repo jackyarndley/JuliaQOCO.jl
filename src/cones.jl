@@ -54,13 +54,13 @@ end
 
 function cone_division!(d::AbstractVector{T}, λ::AbstractVector{T}, v::AbstractVector{T}, l::Int, qdims::AbstractVector{<:Integer}) where {T<:AbstractFloat}
     @inbounds for i in 1:l
-        d[i] = safe_div(v[i], λ[i])
+        d[i] = bounded_ratio(v[i], λ[i])
     end
     idx = l + 1
     for q in qdims
         f = soc_residual2(λ, idx, q)
-        finv = safe_div(one(T), f)
-        λ0inv = safe_div(one(T), λ[idx])
+        finv = bounded_ratio(one(T), f)
+        λ0inv = bounded_ratio(one(T), λ[idx])
         λ1v1 = zero(T)
         @inbounds for k in 1:(q - 1)
             λ1v1 += λ[idx + k] * v[idx + k]
@@ -179,11 +179,11 @@ function nt_multiply_Winv!(
     work::Workspace{T,Ti},
 ) where {T<:AbstractFloat,Ti<:Integer}
     @inbounds for i in 1:data.l
-        z[i] = safe_div(one(T), sqrt(max(work.WtW[i], zero(T)))) * x[i]
+        z[i] = bounded_ratio(one(T), sqrt(max(work.WtW[i], zero(T)))) * x[i]
     end
     for (block, q) in enumerate(data.q)
         idx = work.soc_offsets[block]
-        invscale = safe_div(one(T), work.nt_scale[block])
+        invscale = bounded_ratio(one(T), work.nt_scale[block])
         dot_jv_x = work.nt_v[idx] * x[idx]
         @inbounds for k in 1:(q - 1)
             dot_jv_x -= work.nt_v[idx + k] * x[idx + k]
@@ -205,7 +205,7 @@ function compute_nt_scaling!(solver::CoreSolver{T}) where {T<:AbstractFloat}
     data = solver.data
     work = solver.work
     @inbounds for i in 1:data.l
-        w2 = safe_div(work.s[i], work.z[i])
+        w2 = bounded_ratio(work.s[i], work.z[i])
         work.WtW[i] = w2
         w = sqrt(w2)
     end
@@ -216,8 +216,8 @@ function compute_nt_scaling!(solver::CoreSolver{T}) where {T<:AbstractFloat}
 
         s_scal = sqrt(max(soc_residual2(work.s, idx, q), zero(T)))
         z_scal = sqrt(max(soc_residual2(work.z, idx, q), zero(T)))
-        sf = safe_div(one(T), s_scal)
-        zf = safe_div(one(T), z_scal)
+        sf = bounded_ratio(one(T), s_scal)
+        zf = bounded_ratio(one(T), z_scal)
         @inbounds for k in 0:(q - 1)
             work.sbar[k + 1] = sf * work.s[idx + k]
             work.zbar[k + 1] = zf * work.z[idx + k]
@@ -228,19 +228,19 @@ function compute_nt_scaling!(solver::CoreSolver{T}) where {T<:AbstractFloat}
             dot_sbar_zbar += work.sbar[k] * work.zbar[k]
         end
         gamma = sqrt(T(0.5) * (one(T) + dot_sbar_zbar))
-        f = safe_div(one(T), T(2) * gamma)
+        f = bounded_ratio(one(T), T(2) * gamma)
         work.sbar[1] = f * (work.sbar[1] + work.zbar[1])
         @inbounds for k in 2:q
             work.sbar[k] = f * (work.sbar[k] - work.zbar[k])
         end
 
-        f = safe_div(one(T), sqrt(T(2) * (work.sbar[1] + one(T))))
+        f = bounded_ratio(one(T), sqrt(T(2) * (work.sbar[1] + one(T))))
         work.zbar[1] = f * (work.sbar[1] + one(T))
         @inbounds for k in 2:q
             work.zbar[k] = f * work.sbar[k]
         end
 
-        scale = sqrt(safe_div(s_scal, z_scal))
+        scale = sqrt(bounded_ratio(s_scal, z_scal))
         scale2 = scale * scale
         work.nt_scale[block] = scale
         @inbounds for k in 0:(q - 1)

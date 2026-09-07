@@ -25,6 +25,16 @@ const MOI_TEST_CONFIG = MOI.Test.Config(
     exclude = MOI_EXCLUDED_ATTRIBUTES,
 )
 
+# Single precision needs a tolerance appropriate to single precision: asking a
+# `Float32` solve to match a reference to 1e-4 is close to asking for every
+# digit it has.
+const MOI_TEST_CONFIG_F32 = MOI.Test.Config(
+    Float32;
+    atol = 1e-2,
+    rtol = 1e-2,
+    exclude = MOI_EXCLUDED_ATTRIBUTES,
+)
+
 # Tests excluded for reasons that are properties of the algorithm, not gaps in
 # the wrapper. Every entry is a case that requires an infeasibility or
 # unboundedness certificate: this solver reports an honest numerical failure
@@ -95,6 +105,35 @@ MOI.Test.runtests(
         "test_objective_set_via_modify",
         "test_quadratic_duplicate_terms",
     ],
+    exclude = MOI_EXCLUDED_TESTS,
+    warn_unsupported = false,
+)
+
+# The same conformance suite in single precision, restricted to the families
+# the solver supports natively. The exotic cones are reached only through
+# MathOptInterface bridges, and several of those bridges mix `Float32` and
+# `Float64` internally, which is an upstream limitation rather than one of
+# this solver: `test_conic_DualGeometricMeanCone_VectorAffineFunction` fails
+# inside `MOI.Utilities.operate` before reaching any JuliaQOCO code.
+const MOI_TEST_FAMILIES_F32 = [
+    r"^test_conic_SecondOrderCone",
+    r"^test_conic_linear",
+    r"^test_linear_",
+    r"^test_modification_",
+    r"^test_objective_",
+    r"^test_quadratic_",
+    r"^test_solve_",
+    r"^test_variable_",
+]
+
+MOI.Test.runtests(
+    MOI.instantiate(
+        JuliaQOCO.Optimizer{Float32};
+        with_bridge_type = Float32,
+        with_cache_type = Float32,
+    ),
+    MOI_TEST_CONFIG_F32;
+    include = MOI_TEST_FAMILIES_F32,
     exclude = MOI_EXCLUDED_TESTS,
     warn_unsupported = false,
 )

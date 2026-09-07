@@ -1,15 +1,61 @@
+# Defaults that depend on the precision of the element type.
+#
+# Every one of these has a floor taken from the value tuned for `Float64`, so
+# `Float64` behaviour is unchanged, and a term proportional to `eps(T)` that
+# takes over in lower precision. A fixed `Float64` literal is not a safe
+# default for a parameterized solver: an absolute tolerance of `1e-7` is below
+# `eps(Float32)` and so can never be met reliably, and a regularization shift
+# of `1e-8` added to a diagonal entry of order one simply vanishes in single
+# precision.
+
+# Smallest residual worth asking for. Below a few multiples of `eps`, the
+# residual of a well-scaled problem is rounding noise rather than progress.
+default_abstol(::Type{T}) where {T<:AbstractFloat} =
+    max(T(1e-7), T(0.1) * sqrt(eps(T)))
+default_reltol(::Type{T}) where {T<:AbstractFloat} = default_abstol(T)
+
+# The relaxed tolerances sit two orders of magnitude above the requested ones.
+# They are written with their own floor rather than as `100 *` the requested
+# ones, so that the tuned `Float64` value comes out exactly `1e-5` instead of
+# the `9.999999999999999e-6` that the multiplication would produce.
+default_abstol_inacc(::Type{T}) where {T<:AbstractFloat} =
+    max(T(1e-5), T(10) * sqrt(eps(T)))
+default_reltol_inacc(::Type{T}) where {T<:AbstractFloat} = default_abstol_inacc(T)
+
+# Regularization has to be large enough to actually change a diagonal entry of
+# order one, which means it cannot be far below `sqrt(eps)`.
+default_regularization(::Type{T}) where {T<:AbstractFloat} =
+    max(T(1e-8), T(0.67) * sqrt(eps(T)))
+
+# A step this small is a stall rather than progress. In single precision a
+# step below `eps` cannot move the iterate at all.
+default_min_step(::Type{T}) where {T<:AbstractFloat} = max(T(1e-8), eps(T))
+
+# When to stop iterative refinement, as a relative residual.
+#
+# `sqrt(eps)` is the usual "half the digits" rule, and it is what double
+# precision uses. It is not safe on its own: in single precision half the
+# digits is only 3e-4, which is loose enough that a Newton direction can be
+# accepted while still qualitatively wrong - the sparse second-order-cone
+# expansion, whose augmented system is deliberately larger than the original,
+# stalls at that tolerance and converges cleanly below it. The absolute cap
+# expresses the part that does not depend on precision: a direction whose
+# relative residual is worse than 1e-5 is not a Newton direction.
+default_iter_ref_tol(::Type{T}) where {T<:AbstractFloat} =
+    min(sqrt(eps(T)), T(1e-5))
+
 Base.@kwdef mutable struct Settings{T<:AbstractFloat}
     max_iters::Int = 200
     bisect_iters::Int = 5
     ruiz_iters::Int = 3
     iter_ref_iters::Int = 1
-    iter_ref_tol::T = sqrt(eps(T))
-    kkt_static_reg::T = T(1e-8)
-    kkt_dynamic_reg::T = T(1e-8)
-    abstol::T = T(1e-7)
-    reltol::T = T(1e-7)
-    abstol_inacc::T = T(1e-5)
-    reltol_inacc::T = T(1e-5)
+    iter_ref_tol::T = default_iter_ref_tol(T)
+    kkt_static_reg::T = default_regularization(T)
+    kkt_dynamic_reg::T = default_regularization(T)
+    abstol::T = default_abstol(T)
+    reltol::T = default_reltol(T)
+    abstol_inacc::T = default_abstol_inacc(T)
+    reltol_inacc::T = default_reltol_inacc(T)
     verbose::Bool = true
     profile::Bool = false
     reuse_solver::Bool = true

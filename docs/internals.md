@@ -86,6 +86,45 @@ Because `k > 0` and `D > 0`, `P_hat` without the shift is a congruence
 transform of `P` and has the same inertia. Convexity can therefore be verified
 on the stored matrix without unscaling it.
 
+## Numeric types and hard-coded constants
+
+The solver is parameterized on its element type and is tested at `Float64` and
+`Float32`. That imposes one discipline on every change: **no numerical
+constant may be a bare `Float64` literal.**
+
+The failure mode is not hypothetical. An absolute tolerance of `1e-7` is below
+`eps(Float32)`, so a single-precision solve can never meet it. A static
+regularization of `1e-8` added to a diagonal entry of order one is a no-op in
+single precision. Both were bugs until the type-dependent defaults in
+`settings.jl` replaced them; each rule is written as a floor at the tuned
+`Float64` value plus a term proportional to `eps(T)`, so double precision keeps
+exactly the values it was tuned with and lower precision gets something
+achievable.
+
+The subtler case is division. There are two genuinely different situations,
+and they need different guards:
+
+- A denominator that has **no business being small**, such as a total
+  complementarity that has already collapsed. `checked_div` compares it
+  against `safe_div_eps(T)` and reports `NaN` rather than fabricating a value.
+- A denominator that is **expected to become small**, because the barrier
+  drives it there: a slack, a dual, a cone determinant, a Nesterov-Todd scale.
+  `bounded_ratio` computes the quotient whenever it is representable and
+  saturates only on genuine overflow.
+
+Conflating the two is what a single `safe_div` with a fixed epsilon did, and it
+was wrong on its own terms even in double precision - it just could not be
+reached there, because `1e-15` is below any dual the solver produces. In
+single precision it is reached immediately: a dual of `1.6e-7` is an ordinary
+iterate, and turning `w^2 = s/z` into `floatmax` for it collapses the step
+length to `1e-25` and stalls the solve on a three-variable linear program.
+`safe_div` no longer exists.
+
+Scalar problem dimensions (`n`, `m`, `p`, `l`) are plain `Int` even when the
+sparse index type is `Int32`. The index type governs the CSC arrays, where it
+buys memory; propagating it into every offset and count buys nothing and makes
+every helper signature a compatibility hazard.
+
 ## Three different KKT matrices
 
 They are genuinely different objects and confusing them causes silent errors.

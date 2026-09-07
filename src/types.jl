@@ -62,11 +62,15 @@ mutable struct ProblemData{T<:AbstractFloat,Ti<:Integer}
     GtoGt::Vector{Ti}
     GfromGt::Vector{Ti}
     h::Vector{T}
-    l::Ti
+    # Dimensions are plain `Int` even when the sparse index type is narrower.
+    # The index type governs the CSC arrays, where it buys memory; using it for
+    # scalar sizes as well would propagate a narrow integer into every offset
+    # and count in the solver, for no benefit.
+    l::Int
     q::Vector{Ti}
-    n::Ti
-    m::Ti
-    p::Ti
+    n::Int
+    m::Int
+    p::Int
     Padded_idx::Vector{Ti}
     stats::ScalingStats{T}
     stats_dirty::Bool

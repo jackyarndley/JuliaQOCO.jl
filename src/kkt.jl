@@ -763,7 +763,7 @@ function check_stopping!(solver::CoreSolver{T}) where {T<:AbstractFloat}
         return true
     end
 
-    if solver.work.a < T(1e-8)
+    if solver.work.a < default_min_step(T)
         if quality_inacc <= one(T)
             sol.status = QOCO_SOLVED_INACCURATE
             sol.status_detail = "stalled step but met inaccurate tolerances"

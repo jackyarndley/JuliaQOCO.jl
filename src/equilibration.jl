@@ -102,17 +102,17 @@ function initialize_scaling(data::ProblemData{T}) where {T<:AbstractFloat}
 end
 
 @inline function _ruiz_inverse_sqrt(value::T) where {T<:AbstractFloat}
-    (isfinite(value) && value > T(SAFE_DIV_EPS)) || return one(T)
+    (isfinite(value) && value > safe_div_eps(T)) || return one(T)
     scale = inv(sqrt(value))
     return isfinite(scale) && scale > zero(T) ? scale : one(T)
 end
 
 # Objective scale for one Ruiz sweep. A zero or unusable objective norm means
 # there is nothing to equilibrate, so the neutral scale one is returned rather
-# than the `safe_div` sentinel, which would overflow k. The result is also
-# bounded so that a merely tiny objective cannot run k away over the sweeps.
+# than a huge sentinel, which would overflow k. The result is also bounded so
+# that a merely tiny objective cannot run k away over the sweeps.
 @inline function _objective_scale(norm_value::T, k_so_far::T) where {T<:AbstractFloat}
-    (isfinite(norm_value) && norm_value > T(SAFE_DIV_EPS)) || return one(T)
+    (isfinite(norm_value) && norm_value > safe_div_eps(T)) || return one(T)
     g = inv(norm_value)
     isfinite(g) && g > zero(T) || return one(T)
     limit = T(MAX_OBJECTIVE_SCALE)

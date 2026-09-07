@@ -151,6 +151,14 @@ function oracle_report(
     )
 end
 
+# Default accuracy the oracle demands of a converged solve, and the tightness
+# with which the reported metrics must match the recomputed ones. Both are
+# derived from the element type: asking a `Float32` solve for a `1e-6`
+# residual, or for its reported residual to agree with a recomputed one to
+# `1e-9`, would be asking for accuracy the arithmetic cannot represent.
+oracle_tolerance(::Type{T}) where {T<:AbstractFloat} = max(T(1e-6), T(8) * sqrt(eps(T)))
+report_tolerance(::Type{T}) where {T<:AbstractFloat} = max(T(1e-9), T(8) * eps(T))
+
 """
     check_result(problem, solution; atol, rtol, label)
 
@@ -161,8 +169,8 @@ that same iterate. Every quantity here is recomputed from scratch.
 function check_result(
     problem::OracleProblem{T},
     solution;
-    atol::T = T(1e-6),
-    rtol::T = T(1e-6),
+    atol::T = oracle_tolerance(T),
+    rtol::T = oracle_tolerance(T),
     label::AbstractString = "",
     check_reported::Bool = true,
 ) where {T<:AbstractFloat}
@@ -171,7 +179,7 @@ function check_result(
 
     @test report.finite
     # Cone membership, up to the rounding the solver itself tolerates.
-    cone_tol = T(1e-8) * max(one(T), report.primal_reference)
+    cone_tol = report_tolerance(T) * max(one(T), report.primal_reference)
     @test report.primal_cone_distance <= cone_tol
     @test report.dual_cone_distance <= cone_tol
 
@@ -183,15 +191,20 @@ function check_result(
     if check_reported
         # The reported metrics must describe the returned vectors. The primal
         # residual the solver reports is the larger of the two primal blocks.
+        absolute = report_tolerance(T)
+        relative = max(T(1e-5), T(64) * eps(T))
         reported_primal = max(report.eq_residual, report.cone_residual)
         scale = max(one(T), report.primal_reference)
-        @test isapprox(solution.pres, reported_primal; atol = 1e-9 * scale, rtol = 1e-5)
+        @test isapprox(solution.pres, reported_primal; atol = absolute * scale, rtol = relative)
         dual_scale = max(one(T), report.dual_reference)
-        @test isapprox(solution.dres, report.dual_residual; atol = 1e-9 * dual_scale, rtol = 1e-5)
+        @test isapprox(solution.dres, report.dual_residual; atol = absolute * dual_scale, rtol = relative)
         gap_scale = max(one(T), report.objective_reference)
-        @test isapprox(solution.gap, report.complementarity; atol = 1e-9 * gap_scale, rtol = 1e-5)
+        @test isapprox(solution.gap, report.complementarity; atol = absolute * gap_scale, rtol = relative)
         objective_scale = max(one(T), abs(report.objective))
-        @test isapprox(solution.obj, report.objective; atol = 1e-9 * objective_scale, rtol = 1e-7)
+        @test isapprox(
+            solution.obj, report.objective;
+            atol = absolute * objective_scale, rtol = max(T(1e-7), T(8) * eps(T)),
+        )
     end
     if !isempty(prefix) && !report.finite
         @info string(prefix, "oracle report", report)

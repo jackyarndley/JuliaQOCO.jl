@@ -1,20 +1,39 @@
 const SAFE_DIV_EPS = 1e-15
 
+# Denominator below which a ratio is treated as meaningless. The floor is the
+# value tuned for `Float64`; the `eps`-proportional term takes over in lower
+# precision, where 1e-15 would be far below the noise level and would let a
+# ratio built from rounding error through as if it were a real number.
+#
+# This threshold is only for quantities that have no business being small.
+# Anything the barrier drives towards zero - a slack, a dual, a cone
+# determinant, a Nesterov-Todd scale - must use `bounded_ratio` instead.
+@inline safe_div_eps(::Type{T}) where {T<:AbstractFloat} =
+    max(T(SAFE_DIV_EPS), T(4) * eps(T))
+
 @inline elapsed_time_sec(t0::UInt64) = (time_ns() - t0) * 1e-9
 
-# Ratio used where a vanishing denominator means "no restriction", such as a
-# barrier ratio or a fraction-to-boundary step: the huge positive sentinel is
-# discarded by the caller by taking a `min`. Do not use it where the sign of
-# the result matters, or where a small denominator is a genuine numerical
-# failure; use `checked_div` or `positive_inv` instead.
-@inline function safe_div(a::T, b::T) where {T<:AbstractFloat}
-    return abs(b) > T(SAFE_DIV_EPS) ? a / b : floatmax(T)
+# Ratio whose denominator is nonnegative and is *expected* to become small:
+# the interior-point method drives slacks, duals and cone determinants towards
+# zero, so `s/z` growing without bound is the normal course of a solve, not a
+# failure. The quotient is therefore computed whenever it is representable,
+# and only a genuine overflow saturates. The sign of the numerator is kept.
+#
+# Using a fixed epsilon here instead would replace a large but perfectly good
+# scaling with a sentinel: in single precision a dual of 1.6e-7 is an ordinary
+# iterate, and turning `s/z` into `floatmax` for it destroys the step.
+@inline function bounded_ratio(a::T, b::T) where {T<:AbstractFloat}
+    iszero(a) && return zero(T)
+    (isfinite(a) && isfinite(b) && b > zero(T)) || return copysign(floatmax(T), a)
+    value = a / b
+    return isfinite(value) ? value : copysign(floatmax(T), a)
 end
 
 # Sign-preserving division that reports an unusable denominator as NaN rather
-# than fabricating a large positive value.
+# than fabricating a large value. For denominators that are *not* expected to
+# vanish, such as a total complementarity that has already collapsed.
 @inline function checked_div(a::T, b::T) where {T<:AbstractFloat}
-    (isfinite(a) && isfinite(b) && abs(b) > T(SAFE_DIV_EPS)) || return T(NaN)
+    (isfinite(a) && isfinite(b) && abs(b) > safe_div_eps(T)) || return T(NaN)
     value = a / b
     return isfinite(value) ? value : T(NaN)
 end

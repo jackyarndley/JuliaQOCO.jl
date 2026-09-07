@@ -7,7 +7,10 @@ using LinearAlgebra
 using SparseArrays
 using JuliaQOCO
 
-include("oracle.jl")
+# The oracle is shared by every test file; include it only once so that the
+# files can be run individually or together without creating two modules that
+# export the same names.
+isdefined(@__MODULE__, :Oracle) || include("oracle.jl")
 using .Oracle
 
 const Q = JuliaQOCO

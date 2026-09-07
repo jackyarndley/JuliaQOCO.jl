@@ -91,7 +91,7 @@ function _problem_data(
     settings::Settings{T},
 ) where {T<:AbstractFloat,Ti<:Integer}
     validate_data(P, c, A, b, G, h, l, q)
-    n = Ti(length(c))
+    n = length(c)
     A0 = A === nothing ? spzeros(T, 0, n) : copy(A)
     G0 = G === nothing ? spzeros(T, 0, n) : copy(G)
     b0 = b === nothing ? zeros(T, 0) : collect(b)
@@ -128,11 +128,11 @@ function _problem_data(
         GtoGt,
         GfromGt,
         h0,
-        Ti(l),
+        Int(l),
         qv,
         n,
-        Ti(length(h0)),
-        Ti(length(b0)),
+        length(h0),
+        length(b0),
         Padded_idx,
         ScalingStats(T),
         false,
@@ -187,10 +187,10 @@ function _linsys(data::ProblemData{T,Ti}, settings::Settings{T}, work::Workspace
     # The augmented system stays quasidefinite: the positive block holds the
     # primal variables and the first auxiliary variable of each expanded cone,
     # the negative block holds everything else.
-    signs = vcat(ones(Int, data.n), -ones(Int, data.p + data.m))
+    signs = vcat(ones(Ti, data.n), -ones(Ti, data.p + data.m))
     for _ in 1:count_expanded(work.soc_expanded)
-        push!(signs, 1)
-        push!(signs, -1)
+        push!(signs, one(Ti))
+        push!(signs, -one(Ti))
     end
     factor = QDLDL.qdldl(
         K;
